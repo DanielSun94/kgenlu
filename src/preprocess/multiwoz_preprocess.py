@@ -4,6 +4,7 @@ import torch.utils.data as data
 import random
 from multiwoz_config import PAD_token, SOS_token, EOS_token, UNK_token, USE_CUDA, args, multiwoz_data_folder,\
     multiwoz_resource_folder, EXPERIMENT_DOMAINS
+from multiwoz_config import gate_dict as gating_dict
 from collections import OrderedDict
 from embeddings import GloveEmbedding, KazumaCharEmbedding
 from tqdm import tqdm
@@ -210,7 +211,7 @@ def collate_fn(data_):
     return item_info
 
 
-def read_lang(file_name, gating_dict, all_slots, dataset, lang, mem_lang, training, max_line=None):
+def read_lang(file_name, gate_dict, all_slots, dataset, lang, mem_lang, training, max_line=None):
     """
     所有的utterance都携带了完整的上下文信息
     """
@@ -304,18 +305,18 @@ def read_lang(file_name, gating_dict, all_slots, dataset, lang, mem_lang, traini
                         generate_y.append(turn_belief_dict[slot])
 
                         if turn_belief_dict[slot] == "dontcare":
-                            gating_label.append(gating_dict["dontcare"])
+                            gating_label.append(gate_dict["dontcare"])
                         elif turn_belief_dict[slot] == "none":
-                            gating_label.append(gating_dict["none"])
+                            gating_label.append(gate_dict["none"])
                         else:
-                            gating_label.append(gating_dict["ptr"])
+                            gating_label.append(gate_dict["ptr"])
 
                         if max_value_len < len(turn_belief_dict[slot]):
                             max_value_len = len(turn_belief_dict[slot])
 
                     else:
                         generate_y.append("none")
-                        gating_label.append(gating_dict["none"])
+                        gating_label.append(gate_dict["none"])
 
                 data_detail = {
                     "ID": dial_dict["dialogue_idx"],
@@ -419,8 +420,7 @@ def prepare_data_seq(training, batch_size):
     # 此处的ontology其实指代了所有可能出现的slot value
     ontology = json.load(open(os.path.join(multiwoz_data_folder, 'ontology.json'), 'r'))
     all_slots = get_slot_information(ontology)
-    # 指代slot可能出现的三种情况，ptr代指有说明，dontcare代表用户无所谓，none代表未提及
-    gating_dict = {"ptr": 0, "dontcare": 1, "none": 2}
+
     # Vocabulary, 分别给slot进行idx word匹配
     # lang专管utterance的index word，mem专管slot和相对应的值得index word
     lang, mem_lang = Lang(), Lang()
@@ -453,7 +453,7 @@ def prepare_data_seq(training, batch_size):
                 pickle.dump(lang, handle)
             with open(save_folder + mem_lang_name, 'wb') as handle:
                 pickle.dump(mem_lang, handle)
-        emb_dump_path = os.path.join(multiwoz_data_folder, 'emb{}.json'.format(len(lang.index2word)))
+        emb_dump_path = os.path.join(multiwoz_resource_folder, 'emb{}.json'.format(len(lang.index2word)))
         if not os.path.exists(emb_dump_path) and args["load_embedding"]:
             # embed dump load 只做一次
             # 根据 index2word 的表去查embedding，保证dump的json中的list index对应的词embedding和index word dict中的index
@@ -542,7 +542,7 @@ class ImbalancedDatasetSampler(torch.utils.data.sampler.Sampler):
 
 
 def unit_test():
-    train, dev, test, test_special, lang, slots_list, gating_dict, max_word = \
+    train, dev, test, test_special, lang, slots_list, gate_dict, max_word = \
         prepare_data_seq(True, args['batch_size'])
     p_bar = tqdm(enumerate(train), total=len(train))
     for i, batch_data in p_bar:

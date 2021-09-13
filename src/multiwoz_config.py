@@ -6,7 +6,8 @@ PAD_token = 1
 SOS_token = 3
 EOS_token = 2
 UNK_token = 0
-
+# 指代slot可能出现的三种情况，ptr代指有说明，dontcare代表用户无所谓，none代表未提及
+gate_dict = {"ptr": 0, "dontcare": 1, "none": 2}
 if torch.cuda.is_available():
     USE_CUDA = True
 else:
@@ -29,9 +30,10 @@ parser.add_argument('-sample', '--sample', help='Number of Samples', required=Fa
 parser.add_argument('-patience', '--patience', help='', required=False, default=6, type=int)
 parser.add_argument('-es', '--earlyStop', help='Early Stop Criteria, BLEU or ENTF1', required=False, default='BLEU')
 parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=0, type=int)
-parser.add_argument('-data_ratio', '--data_ratio', help='', required=False, default=0.02, type=int)
+parser.add_argument('-data_ratio', '--data_ratio', help='', required=False, default=100, type=int)
 parser.add_argument('-um', '--unk_mask', help='mask out input token to UNK', type=int, required=False, default=1)
-parser.add_argument('-bsz', '--batch_size', help='Batch_size', required=False, type=int, default=2)
+parser.add_argument('-ep', '--epoch', help='training epoch', type=int, required=False, default=0)
+parser.add_argument('-bsz', '--batch_size', help='Batch_size', required=False, type=int, default=64)
 
 # Testing Setting
 parser.add_argument('-rundev', '--run_dev_testing', help='', required=False, default=0, type=int)

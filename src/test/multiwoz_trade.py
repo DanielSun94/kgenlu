@@ -14,7 +14,8 @@ import random
 import json
 from multiwoz_mask import masked_cross_entropy_for_value
 from multiwoz_config import USE_CUDA, args, PAD_token
-from multiwoz_preprocess import prepare_data_seq, multiwoz_data_folder, Lang
+from multiwoz_preprocess import prepare_data_seq, multiwoz_resource_folder, Lang
+from model_eval import evaluate
 
 
 class TRADE(nn.Module):
@@ -77,8 +78,8 @@ class TRADE(nn.Module):
         return 'L:{:.2f},LP:{:.2f},LG:{:.2f}'.format(print_loss_avg, print_loss_ptr, print_loss_gate)
 
     def save_model(self, dec_type):
-        directory = 'save/TRADE-' + args["addName"] + args['dataset'] + str(self.task) + '/' + 'HDD' + str(
-            self.hidden_size) + 'BSZ' + str(args['batch']) + 'DR' + str(self.dropout) + str(dec_type)
+        directory = os.path.join(multiwoz_resource_folder, 'save/TRADE-' + args["add_name"] + '/' + 'HDD' + str(
+            self.hidden_size) + 'BSZ' + str(args['batch_size']) + 'DR' + str(self.dropout) + str(dec_type))
         if not os.path.exists(directory):
             os.makedirs(directory)
         torch.save(self.encoder, directory + '/enc.th')
@@ -155,7 +156,7 @@ class TRADE(nn.Module):
                                  data_['generate_y'], use_teacher_forcing, slot_temp)
         return all_point_outputs, all_gate_outputs, words_point_out, words_class_out
 
-    def evaluate(self, dev, metric_best, slot_temp, early_stop=None):
+    def evaluate(self, dev, slot_temp):
         # Set to not-training mode to disable dropout
         self.encoder.train(False)
         self.decoder.train(False)
@@ -212,101 +213,13 @@ class TRADE(nn.Module):
                             predict_belief_bsz_ptr.append(slot_temp[si] + "-" + str(st))
 
                 all_prediction[data_dev["ID"][bi]][data_dev["turn_id"][bi]]["pred_bs_ptr"] = predict_belief_bsz_ptr
-
                 if set(data_dev["turn_belief"][bi]) != set(predict_belief_bsz_ptr) and args["genSample"]:
                     print("True", set(data_dev["turn_belief"][bi]))
                     print("Pred", set(predict_belief_bsz_ptr), "\n")
 
-        if args["genSample"]:
-            json.dump(all_prediction, open("all_prediction_{}.json".format(self.name), 'w'), indent=4)
-
-        joint_acc_score_ptr, f1_score_ptr, turn_acc_score_ptr = self.evaluate_metrics(all_prediction, "pred_bs_ptr",
-                                                                                      slot_temp)
-
-        evaluation_metrics = {"Joint Acc": joint_acc_score_ptr, "Turn Acc": turn_acc_score_ptr,
-                              "Joint F1": f1_score_ptr}
-        print(evaluation_metrics)
-
-        # Set back to training mode
         self.encoder.train(True)
         self.decoder.train(True)
-
-        joint_acc_score = joint_acc_score_ptr  # (joint_acc_score_ptr + joint_acc_score_class)/2
-        f1_score = f1_score_ptr
-
-        if early_stop == 'F1':
-            if f1_score >= metric_best:
-                self.save_model('ENTF1-{:.4f}'.format(f1_score))
-                print("MODEL SAVED")
-            return f1_score
-        else:
-            if joint_acc_score >= metric_best:
-                self.save_model('ACC-{:.4f}'.format(joint_acc_score))
-                print("MODEL SAVED")
-            return joint_acc_score
-
-    def evaluate_metrics(self, all_prediction, from_which, slot_temp):
-        total, turn_acc, joint_acc, f1_pred, f1_count = 0, 0, 0, 0, 0
-        for d, v in all_prediction.items():
-            for t in range(len(v)):
-                cv = v[t]
-                if set(cv["turn_belief"]) == set(cv[from_which]):
-                    joint_acc += 1
-                total += 1
-
-                # Compute prediction slot accuracy
-                temp_acc = self.compute_acc(set(cv["turn_belief"]), set(cv[from_which]), slot_temp)
-                turn_acc += temp_acc
-
-                # Compute prediction joint F1 score
-                temp_f1, temp_r, temp_p, count = self.compute_prf(set(cv["turn_belief"]), set(cv[from_which]))
-                f1_pred += temp_f1
-                f1_count += count
-
-        joint_acc_score = joint_acc / float(total) if total != 0 else 0
-        turn_acc_score = turn_acc / float(total) if total != 0 else 0
-        f1_score = f1_pred / float(f1_count) if f1_count != 0 else 0
-        return joint_acc_score, f1_score, turn_acc_score
-
-    @staticmethod
-    def compute_acc(gold, pred, slot_temp):
-        miss_gold = 0
-        miss_slot = []
-        for g in gold:
-            if g not in pred:
-                miss_gold += 1
-                miss_slot.append(g.rsplit("-", 1)[0])
-        wrong_pred = 0
-        for p in pred:
-            if p not in gold and p.rsplit("-", 1)[0] not in miss_slot:
-                wrong_pred += 1
-        acc_total = len(slot_temp)
-        acc = len(slot_temp) - miss_gold - wrong_pred
-        acc = acc / float(acc_total)
-        return acc
-
-    @staticmethod
-    def compute_prf(gold, pred):
-        tp, fp, fn = 0, 0, 0
-        if len(gold) != 0:
-            count = 1
-            for g in gold:
-                if g in pred:
-                    tp += 1
-                else:
-                    fn += 1
-            for p in pred:
-                if p not in gold:
-                    fp += 1
-            precision = tp / float(tp + fp) if (tp + fp) != 0 else 0
-            recall = tp / float(tp + fn) if (tp + fn) != 0 else 0
-            f1 = 2 * precision * recall / float(precision + recall) if (precision + recall) != 0 else 0
-        else:
-            if len(pred) == 0:
-                precision, recall, f1, count = 1, 1, 1, 1
-            else:
-                precision, recall, f1, count = 0, 0, 0, 1
-        return f1, recall, precision, count
+        return all_prediction
 
 
 class EncoderRNN(nn.Module):
@@ -321,8 +234,9 @@ class EncoderRNN(nn.Module):
         self.gru = nn.GRU(hidden_size, hidden_size, n_layers, dropout=dropout, bidirectional=True)
         # self.domain_W = nn.Linear(hidden_size, nb_domain)
 
+        # encoder开始处载入embedding
         if args["load_embedding"]:
-            with open(os.path.join(multiwoz_data_folder, 'emb{}.json'.format(vocab_size))) as f:
+            with open(os.path.join(multiwoz_resource_folder, 'emb{}.json'.format(vocab_size))) as f:
                 e = json.load(f)
             new = self.embedding.weight.data.new
             self.embedding.weight.data.copy_(new(e))
@@ -395,6 +309,8 @@ class Generator(nn.Module):
 
         # Get the slot embedding
         # 给30个slot pair每个一个embedding
+        # slot是一个domain-slot结构，因此split之后一定有且只有两个element
+        # 其实这段代码可以优化（slot temp list在一个任务里是不变的，没必要每次调用都算一遍），凡是先放着不管吧
         slot_emb_dict = {}
         slot_emb_arr = None
         for i, slot in enumerate(slot_temp):
@@ -483,6 +399,7 @@ class Generator(nn.Module):
                     dec_state, hidden = self.gru(decoder_input.expand_as(hidden), hidden)
                     context_vec, logits, prob = self.attend(encoded_outputs, hidden.squeeze(0), encoded_lens)
                     if wi == 0:
+                        # gate output 只在一开始算一次。并且和序列输出独立
                         all_gate_outputs[counter] = self.W_gate(context_vec)
                     p_vocab = self.attend_vocab(self.embedding.weight, hidden.squeeze(0))
                     p_gen_vec = torch.cat([dec_state.squeeze(0), context_vec, decoder_input], -1)
@@ -558,7 +475,7 @@ def main():
     # print("[Info] Slots include ", SLOTS_LIST)
     # print("[Info] Unpointable Slots include ", gating_dict)
 
-    for epoch in range(1):
+    for epoch in range(args['epoch']):
         print("Epoch :{}".format(epoch))
         # Run the train function
         p_bar = tqdm(enumerate(train), total=len(train))
@@ -570,8 +487,19 @@ def main():
             # exit(1)
 
         if (epoch + 1) % int(args['evalp']) == 0:
+            all_prediction = model.evaluate(dev, slots_list[2])
+            joint_acc_score, f1_score = evaluate(all_prediction, model.name, slots_list[2])
 
-            acc = model.evaluate(dev, avg_best, slots_list[2], early_stop)
+            if early_stop == 'F1':
+                if f1_score >= avg_best:
+                    model.save_model('ENTF1-{:.4f}'.format(f1_score))
+                    print("MODEL SAVED")
+                return f1_score
+            else:
+                if joint_acc_score >= avg_best:
+                    model.save_model('ACC-{:.4f}'.format(joint_acc_score))
+                    print("MODEL SAVED")
+
             model.scheduler.step(acc)
 
             if acc >= avg_best:
@@ -584,6 +512,8 @@ def main():
             if cnt == args["patience"] or (acc == 1.0 and early_stop is None):
                 print("Ran out of patient, early stop...")
                 break
+    all_prediction = model.evaluate(dev, slots_list[2])
+    _, __ = evaluate(all_prediction, model.name, slots_list[2])
 
 
 if __name__ == '__main__':

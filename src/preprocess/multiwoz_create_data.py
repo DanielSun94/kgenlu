@@ -17,6 +17,11 @@ end comment
 
 Most of the codes are from https://github.com/budzianowski/multiwoz
 """
+#
+# testListFile = 'testListFileForDebug'
+# valListFile = 'valListFileForDebug'
+testListFile = 'testListFile.json'
+valListFile = 'valListFile.json'
 
 with open(os.path.join(multiwoz_data_folder, 'mapping.pair'), 'r') as fin:
     replacements = []
@@ -459,12 +464,12 @@ def divideData(data):
     在此处的divide中，预处理脚本完成了一次移位，相当于把最后一次寒暄去掉了。
     """
     test_list_file = []
-    with open(os.path.join(multiwoz_data_folder, 'testListFile.json'), 'r') as f_in:
+    with open(os.path.join(multiwoz_data_folder, testListFile), 'r') as f_in:
         for line_ in f_in:
             test_list_file.append(line_[:-1])
 
     val_list_file = []
-    with open(os.path.join(multiwoz_data_folder, 'valListFile.json'), 'r') as f_in:
+    with open(os.path.join(multiwoz_data_folder, valListFile), 'r') as f_in:
         for line_ in f_in:
             val_list_file.append(line_[:-1])
 

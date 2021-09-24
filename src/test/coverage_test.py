@@ -8,7 +8,7 @@ from nltk.corpus import wordnet as wn
 
 
 def main():
-    multiwoz_file = os.path.abspath('../../dataset/multiwoz/data.json')
+    multiwoz_file = os.path.abspath('../../resource/multiwoz/data.json')
     word_net_set = read_wordnet()
     utterance_list = read_multiwoz(multiwoz_file)
     coverage_test(utterance_list, word_net_set)

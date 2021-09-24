@@ -2,85 +2,37 @@ import argparse
 import torch
 import os
 
-PAD_token = 1
-SOS_token = 3
-EOS_token = 2
-UNK_token = 0
-# 指代slot可能出现的三种情况，ptr代指有说明，dontcare代表用户无所谓，none代表未提及
-gate_dict = {"ptr": 0, "dontcare": 1, "none": 2}
 if torch.cuda.is_available():
     USE_CUDA = True
 else:
     USE_CUDA = False
 
-# GLOBAL VARIABLES
-DICT_SIZE = 400
-MAX_LENGTH = 50
-EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi"]
-# 此处源代码有两个MAX LENGTH设置，不知道是怎么搞的
-# MAX_LENGTH = 10
-IGNORE_KEYS_IN_GOAL = ['eod', 'topic', 'messageLen', 'message']
-multiwoz_data_folder = os.path.abspath('../../dataset/multiwoz')
+UNK_token, PAD_token, EOS_token, SOS_token = 0, 1, 2, 3
+UNK, SOS, EOS, PAD = 'UNK', 'SOS', 'EOS', 'PAD'
+DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
+# 指代slot可能出现的三种情况，dontcare代表用户无所谓，none代表未提及，span代表有提及，且以句子中matching的方式完成匹配
+# classify代表有提及，且以分类形式完成匹配
+gate_dict = {"dontcare": 0, "none": 1, "span": 2, 'classify': 3}
+
+
+EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi", 'hospital', 'police']
+multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
 multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
-parser = argparse.ArgumentParser(description='TRADE Multi-Domain DST')
+parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
-# Training Setting
-parser.add_argument('-path', '--path', help='path of the file to load', required=False)
-parser.add_argument('-sample', '--sample', help='Number of Samples', required=False, default=None)
-parser.add_argument('-patience', '--patience', help='', required=False, default=6, type=int)
-parser.add_argument('-es', '--earlyStop', help='Early Stop Criteria, BLEU or ENTF1', required=False, default='BLEU')
-parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=0, type=int)
-parser.add_argument('-data_ratio', '--data_ratio', help='', required=False, default=100, type=int)
-parser.add_argument('-um', '--unk_mask', help='mask out input token to UNK', type=int, required=False, default=1)
-parser.add_argument('-ep', '--epoch', help='training epoch', type=int, required=False, default=0)
-parser.add_argument('-bsz', '--batch_size', help='Batch_size', required=False, type=int, default=64)
-
-# Testing Setting
-parser.add_argument('-rundev', '--run_dev_testing', help='', required=False, default=0, type=int)
-parser.add_argument('-viz', '--vizualization', help='vizualization', type=int, required=False, default=0)
-parser.add_argument('-gs', '--genSample', help='Generate Sample', type=int, required=False, default=0)
-parser.add_argument('-evalp', '--evalp', help='evaluation period', required=False, default=1)
-parser.add_argument('-an', '--add_name', help='An add name for the save folder', required=False, default='')
-parser.add_argument('-eb', '--eval_batch', help='Evaluation Batch_size', required=False, type=int, default=0)
-
-# Model architecture
-parser.add_argument('-gate', '--use_gate', help='', required=False, default=1, type=int)
-parser.add_argument('-le', '--load_embedding', help='', required=False, default=True, type=bool)
-parser.add_argument('-femb', '--fix_embedding', help='', required=False, default=0, type=int)
-parser.add_argument('-paral', '--parallel_decode', help='', required=False, default=0, type=int)
-
-# Model Hyper-Parameters
-parser.add_argument('-dec', '--decoder', help='decoder model', required=False, default='kge')
-parser.add_argument('-hdd', '--hidden', help='Hidden size', required=False, type=int, default=400)
-parser.add_argument('-lr', '--learn', help='Learning Rate', required=False, type=float, default=0.001)
-parser.add_argument('-dr', '--drop', help='Drop Out', required=False, type=float, default=0.2)
-parser.add_argument('-lm', '--limit', help='Word Limit', required=False, default=-10000)
-parser.add_argument('-clip', '--clip', help='gradient clipping', required=False, default=10, type=int)
-parser.add_argument('-tfr', '--teacher_forcing_ratio', help='teacher_forcing_ratio', type=float, required=False,
-                    default=0.5)
-# parser.add_argument('-l','--layer', help='Layer Number', required=False)
-
-# Unseen Domain Setting
-parser.add_argument('-l_ewc', '--lambda_ewc', help='regularization term for EWC loss', type=float, required=False,
-                    default=0.01)
-parser.add_argument('-fisher_sample', '--fisher_sample', help='number of sample used to approximate fisher mat',
-                    type=int, required=False, default=0)
-parser.add_argument("--all_model", action="store_true")
-parser.add_argument("--domain_as_task", action="store_true")
-parser.add_argument('--run_except_4d', help='', required=False, default=1, type=int)
-parser.add_argument("--strict_domain", action="store_true")
-parser.add_argument('-exceptd', '--except_domain', help='', required=False, default="", type=str)
-parser.add_argument('-onlyd', '--only_domain', help='', required=False, default="", type=str)
+# Setting
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.01, required=False)
+parser.add_argument('-bs', '--batch_size', help='training batch size', default=128, required=False)
+parser.add_argument('-trd', '--train_domain', help='training domain',
+                    default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)
+parser.add_argument('-ted', '--test_domain', help='testing domain',
+                    default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)
+parser.add_argument('-mdf', '--multiwoz_dataset_folder', help='multiwoz dataset folder',
+                    default=os.path.abspath('../resource/multiwoz/'), required=False)
+parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=False, type=bool)
+parser.add_argument('-es', '--early_stop', help='early stop', default=True, required=False)
+parser.add_argument('-evalp', '--eval_epoch', help='eval epoch index', default=100, type=int, required=False)
 
 args = vars(parser.parse_args())
-if args["load_embedding"]:
-    args["hidden"] = 400
-    print("[Warning] Using hidden size = 400 for pretrained word embedding (300 + 100)...")
-if args["fix_embedding"]:
-    args["add_name"] += "FixEmb"
-if args["except_domain"] != "":
-    args["add_name"] += "Except" + args["except_domain"]
-if args["only_domain"] != "":
-    args["add_name"] += "Only" + args["only_domain"]
 
 print(str(args))

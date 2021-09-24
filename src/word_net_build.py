@@ -16,6 +16,9 @@ relation_idx_dict = \
      'in_usage_domains': IN_USAGE_DOMAIN, 'attributes': ATTRIBUTE, 'entailments': ENTAILMENT, 'also_sees': ALSO_SEE,
      'causes': CAUSE, 'derivationally_related_forms': DERIVATIONALLY_RELATED_FORM, 'verb_groups': VERB_GROUP,
      'similar_tos': SIMILAR_TOS, 'pertainyms': PERTAINYM, 'lemma': LEMMA, 'is_lemma': IS_LEMMA}
+idx_relation_dict = {}
+for key in relation_idx_dict:
+    idx_relation_dict[relation_idx_dict[key]] = key
 
 
 def main():
@@ -26,16 +29,17 @@ def main():
     总的来讲，WordNet中一共存在27种关系（如relation_idx_dict所示）
     2种是同义词集和具体词汇（synset, lemma）之间的关系（LEMMA, IS_LEMMA）
     3种刻画具体词汇之间的关系（lexical relation）分别是：derivationally_related_forms， pertainyms， antonyms,
-    词汇派生关系，从属关系，反义词
+    也就是词汇派生关系，从属关系，反义词
     剩下的22种是同义词集之间的关系
 
     每个同义词集都有相应的definition，部分有example（例句）。
-    synset, definition, example, lemma, 以及lemma和synset之间的关系，就是wordnet中包含的所有信息
+    synset, definition, example, lemma, 以及lemma和synset之间的关系（包括synset-synset, syn-lemma, lemma-lemma三种关联），
+    就是wordnet中包含的所有信息
 
-    不过在实现上，nltk的文档和wordNet的官方文档，以及其具体实现，存在一定的差异。例如，按照道理来讲lemma之间只有三种关系，但其实现中也提供了
+    不过在实现上，nltk的文档和wordNet的官方文档，以及其具体实现，存在一定的差异。例如，按照道理来讲lemma之间只有三种关系，但nltk中也提供了
     lemma之间的诸如region_domains这样的函数，并且在小部分情况下能返回实际的连接；nltk的也文档中没有说对于synset实现了region_domains，
     但是代码中也实现了。针对这一问题，在本研究中，我们一律采纳最宽泛的纳入标准：凡是nltk reader代码中能够捕获到的关系，不管是不是在文档中定义了，
-    都进行记录
+    都进行收集
     """
     relation_count = np.zeros(27)
     unique_relation_set = set()
@@ -207,6 +211,7 @@ def main():
 
     save_obj = {
         'relation_idx_dict': relation_idx_dict,
+        'idx_relation_dict': idx_relation_dict,
         'relation_count': relation_count,
         'unique_relation_set': unique_relation_set,
         'word_idx_dict': word_idx_dict,
@@ -225,9 +230,8 @@ def main():
     _ = pickle.load(open(os.path.abspath('../resource/wordnet/wordnet_KG.pkl'), 'rb'))
     print('accomplish')
     print(np.sum(relation_count))
-    for key in relation_idx_dict:
-        print('key: {}, count: {}'.format(key, relation_count[relation_idx_dict[key]]))
-
+    for key_ in relation_idx_dict:
+        print('key: {}, count: {}'.format(key_, relation_count[relation_idx_dict[key_]]))
 
 
 if __name__ == '__main__':

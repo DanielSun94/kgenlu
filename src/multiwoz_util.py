@@ -16,26 +16,35 @@ import torch.utils.data as data
 preset_word_num = 4
 
 
-def prepare_data():
-    batch_size = args['batch_size']
-    data_path = args['multiwoz_dataset_folder']
-    train_file_path = os.path.join(data_path, 'train_dials.json')
-    dev_file_path = os.path.join(data_path, 'dev_dials.json')
-    test_file_path = os.path.join(data_path, 'test_dials.json')
-    ontology_file_path = os.path.join(data_path, 'ontology.json')
-    all_slots = get_slot_information(ontology_file_path)
+def prepare_data(read_from_cache, file_path):
+    if read_from_cache:
+        data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, slot_value_idx_dict, \
+            slot_name_idx_dict, max_utterance_len = pickle.load(open(file_path, 'rb'))
+    else:
+        batch_size = args['batch_size']
+        data_path = args['multiwoz_dataset_folder']
+        train_file_path = os.path.join(data_path, 'train_dials.json')
+        dev_file_path = os.path.join(data_path, 'dev_dials.json')
+        test_file_path = os.path.join(data_path, 'test_dials.json')
+        ontology_file_path = os.path.join(data_path, 'ontology.json')
+        all_slots = get_slot_information(ontology_file_path)
 
-    valid_idx_set = dialogue_filter(train_file_path, dev_file_path, test_file_path, args['train_domain'],
-                                    args['test_domain'])
+        valid_idx_set = dialogue_filter(train_file_path, dev_file_path, test_file_path, args['train_domain'],
+                                        args['test_domain'])
 
-    word_index_stat = create_word_index_mapping(all_slots, train_file_path, dev_file_path, test_file_path, valid_idx_set)
-    data_dict, max_utterance_len = load_corpus(all_slots, train_file_path, dev_file_path, test_file_path, valid_idx_set)
-    data_dict, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = \
-        state_reorganize(data_dict, args['train_domain'], args['test_domain'])
-    data_dict = tokenize_utterance(data_dict, word_index_stat)
-    train = get_sequence(data_dict['train'], batch_size, True)
-    dev = get_sequence(data_dict['dev'], batch_size, True)
-    test = get_sequence(data_dict['test'], batch_size, True)
+        word_index_stat = create_word_index_mapping(all_slots, train_file_path, dev_file_path, test_file_path,
+                                                    valid_idx_set)
+        data_dict, max_utterance_len = load_corpus(all_slots, train_file_path, dev_file_path, test_file_path,
+                                                   valid_idx_set)
+        data_dict, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = \
+            state_reorganize(data_dict, args['train_domain'], args['test_domain'])
+        data_dict = tokenize_utterance(data_dict, word_index_stat)
+        train = get_sequence(data_dict['train'], batch_size, True)
+        dev = get_sequence(data_dict['dev'], batch_size, True)
+        test = get_sequence(data_dict['test'], batch_size, True)
+        pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict,
+                     slot_value_idx_dict, slot_name_idx_dict, max_utterance_len], open(file_path, 'wb'))
+    load_glove_embeddings(word_index_stat.word2index)
     print('data prepared')
 
     print("Read %s pairs train" % len(data_dict['train']))
@@ -460,12 +469,13 @@ def get_slot_information(ontology_file_path):
     return slots
 
 
-def load_glove_embeddings(file_path, word_index_dict, save_path=None):
+def load_glove_embeddings(word_index_dict):
     """
     The embeddings of out-of-vocab word in the word_index_dict will be assigned as UNK vector
     if the used model has embeddings of UNK, PAD, EOS, SOS. we will use zero vector, average, or random vectors
     to represent them respectively.
     """
+    save_path = os.path.join(args['aligned_embedding_path'], 'glove_42B_embed_{}'.format(len(word_index_dict)))
     if os.path.exists(save_path):
         return pickle.load(open(save_path, 'rb'))
 
@@ -475,7 +485,7 @@ def load_glove_embeddings(file_path, word_index_dict, save_path=None):
     print("Loading Glove Model")
     glove_embedding = []
     glove_word_index_dict = {}
-    with open(file_path, 'r', encoding='utf-8') as f:
+    with open(args['full_embedding_path'], 'r', encoding='utf-8') as f:
         line_idx = 0
         for line in f:
             split_line = line.split()
@@ -1046,19 +1056,15 @@ def utt_format(utt):
 
 
 def main():
+    file_path = os.path.abspath('../resource/multiwoz/cache.pkl')
     train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = \
-        prepare_data()
-
-    glove_save_path = os.path.abspath('../resource/embedding/glove_42b_embed_{}'
-                                      .format(len(word_index_stat.index2word)))
-    glove_embedding_path = os.path.abspath('../resource/embedding/glove.42B.300d.txt')
+        prepare_data(True, file_path)
     wordnet_embedding_path = os.path.abspath('../resource/transe_checkpoint/WordNet_2000_checkpoint.tar')
     wordnet_path = os.path.abspath('../resource/wordnet/wordnet_KG.pkl')
 
     wordnet_obj = pkl.load(open(wordnet_path, 'rb'))
-    glove_embed_mat = load_glove_embeddings(glove_embedding_path, word_index_stat.word2index, glove_save_path)
     entity_embed_dict, relation_embed_dict = load_graph_embeddings(wordnet_embedding_path, wordnet_obj)
-    embedding_mat = graph_embeddings_alignment(entity_embed_dict, word_index_stat.word2index)
+    graph_embeddings_alignment(entity_embed_dict, word_index_stat.word2index)
     print('util execute accomplished')
 
 

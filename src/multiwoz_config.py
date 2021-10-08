@@ -1,12 +1,10 @@
 import argparse
 import torch
+from datetime import datetime
 import os
 
-if torch.cuda.is_available():
-    USE_CUDA = True
-else:
-    USE_CUDA = False
-
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 UNK_token, PAD_token, EOS_token, SOS_token = 0, 1, 2, 3
 UNK, SOS, EOS, PAD = 'UNK', 'SOS', 'EOS', 'PAD'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
@@ -20,9 +18,13 @@ multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
 multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
 parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
+parser.add_argument('-sl', '--span_limit', help='classify slot / span slot threshold', default=10, required=False)
+parser.add_argument('-esp', '--evaluation_save_path', help='evaluation save path', type=str, required=False,
+                    default=os.path.abspath('../resource/evaluation/eval_{}.csv'.format(current_time)))
+
 # Setting
 parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.01, required=False)
-parser.add_argument('-bs', '--batch_size', help='training batch size', default=128, required=False)
+parser.add_argument('-bs', '--batch_size', help='training batch size', default=32, required=False)
 parser.add_argument('-trd', '--train_domain', help='training domain',
                     default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)
 parser.add_argument('-ted', '--test_domain', help='testing domain',
@@ -32,6 +34,8 @@ parser.add_argument('-mdf', '--multiwoz_dataset_folder', help='multiwoz dataset 
 parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=False, type=bool)
 parser.add_argument('-es', '--early_stop', help='early stop', default=True, required=False)
 parser.add_argument('-evalp', '--eval_epoch', help='eval epoch index', default=100, type=int, required=False)
+parser.add_argument('-cp', '--cache_path', help='corpus cache path', type=str, required=False,
+                    default=os.path.abspath('../resource/multiwoz/cache.pkl'))
 
 # Pretrained Embedding Setting
 parser.add_argument('-le', '--load_embedding', help='load pretrained embedding', default=True, type=bool,
@@ -42,7 +46,10 @@ parser.add_argument('-ue', '--update_embedding', help='update embedding in train
                     required=False)
 parser.add_argument('-fep', '--full_embedding_path', help='file path of full embedding', type=str, required=False,
                     default=os.path.abspath('../resource/embedding/glove.42B.300d.txt'))
-
+parser.add_argument('-wnep', '--wordnet_embedding_path', help='pretrained wordnet file path', type=str, required=False,
+                    default=os.path.abspath('../resource/transe_checkpoint/WordNet_2000_checkpoint.tar'))
+parser.add_argument('-wnp', '--wordnet_path', help='wordnet file path', type=str, required=False,
+                    default=os.path.abspath('../resource/wordnet/wordnet_KG.pkl'))
 
 # Encoder (Transformer) Setting
 parser.add_argument('-ed', '--encoder_dropout', help='encoder hidden size', default=0.1, type=float, required=False)

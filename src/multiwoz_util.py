@@ -6,20 +6,20 @@ import numpy as np
 import os
 import pickle
 import torch
-import pickle as pkl
-from multiwoz_config import args, UNK, PAD, SOS, EOS, EXPERIMENT_DOMAINS, UNK_token, PAD_token, SOS_token,\
-    EOS_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, USE_CUDA
+from multiwoz_config import args, UNK, PAD, SOS, EOS, EXPERIMENT_DOMAINS, UNK_token, PAD_token, SOS_token, \
+    EOS_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, DEVICE
 import json
 import re
 import torch.utils.data as data
+
 # preset token tag
 preset_word_num = 4
 
 
 def prepare_data(read_from_cache, file_path):
     if read_from_cache:
-        data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, slot_value_idx_dict, \
-            slot_name_idx_dict, max_utterance_len = pickle.load(open(file_path, 'rb'))
+        data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, max_utterance_len = \
+            pickle.load(open(file_path, 'rb'))
     else:
         batch_size = args['batch_size']
         data_path = args['multiwoz_dataset_folder']
@@ -36,14 +36,14 @@ def prepare_data(read_from_cache, file_path):
                                                     valid_idx_set)
         data_dict, max_utterance_len = load_corpus(all_slots, train_file_path, dev_file_path, test_file_path,
                                                    valid_idx_set)
-        data_dict, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = \
+        data_dict, slot_value_dict, slot_type_dict = \
             state_reorganize(data_dict, args['train_domain'], args['test_domain'])
         data_dict = tokenize_utterance(data_dict, word_index_stat)
         train = get_sequence(data_dict['train'], batch_size, True)
         dev = get_sequence(data_dict['dev'], batch_size, True)
         test = get_sequence(data_dict['test'], batch_size, True)
-        pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict,
-                     slot_value_idx_dict, slot_name_idx_dict, max_utterance_len], open(file_path, 'wb'))
+        pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, max_utterance_len],
+                    open(file_path, 'wb'))
     load_glove_embeddings(word_index_stat.word2index)
     print('data prepared')
 
@@ -52,17 +52,19 @@ def prepare_data(read_from_cache, file_path):
     print("Read %s pairs test" % len(data_dict['test']))
     print("Vocab_size: %s " % word_index_stat.n_words)
     print("Max. length of dialog words: %s " % max_utterance_len)
-    print("USE_CUDA={}".format(USE_CUDA))
-    return train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict
+    print("Device = {}".format(DEVICE))
+    return train, dev, test, word_index_stat, slot_value_dict, slot_type_dict
 
 
 def tokenize_utterance(data_dict, word_index_stat):
     for dialogues in data_dict['train'], data_dict['dev'], data_dict['test']:
         for dialog in dialogues:
-            dialog_history = [word_index_stat.index_word(word) if word in word_index_stat.index2word else UNK_token
-                              for word in dialog['dialog_history'].split()]
-            current_utterance = [word_index_stat.index_word(word) if word in word_index_stat.index2word else UNK_token
-                                 for word in dialog['turn_uttr'].split()]
+            dialog_history = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
+                              else UNK_token for word in dialog['dialog_history'].split()]
+            current_utterance = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
+                                 else UNK_token for word in dialog['turn_uttr'].split()]
+            dialog['turn_uttr_plain'] = dialog['turn_uttr']
+            dialog['dialog_history_plain'] = dialog['dialog_history']
             dialog['turn_uttr'] = current_utterance
             dialog['dialog_history'] = dialog_history
     return data_dict
@@ -114,25 +116,22 @@ def collate_fn(data_):
     data_.sort(key=lambda x: len(x['context']), reverse=True)
     item_info = {}
     for key in data_[0].keys():
-        item_info[key] = np.array([d[key] for d in data_])
+        item_info[key] = [d[key] for d in data_]
+
+    label = item_info['label']
+    label_reorganize = {}
+    for item in label:
+        for key in item:
+            if not label_reorganize.__contains__(key):
+                label_reorganize[key] = []
+            label_reorganize[key].append(item[key])
+    item_info['label'] = label_reorganize
 
     # merge sequences
     src_seqs, src_lengths = merge(item_info['context'])
-    label = torch.tensor(item_info["label"])
-    gate = torch.tensor(item_info["gate"])
-    turn_domain = torch.tensor(item_info["turn_domain"])
-
-    if USE_CUDA:
-        src_seqs = src_seqs.cuda()
-        gate = gate.cuda()
-        turn_domain = turn_domain.cuda()
-        label = label.cuda()
 
     item_info["context"] = src_seqs
     item_info["context_len"] = src_lengths
-    item_info["gate"] = gate
-    item_info["turn_domain"] = turn_domain
-    item_info["label"] = label
     return item_info
 
 
@@ -145,6 +144,8 @@ class Dataset(data.Dataset):
         self.turn_domain = data_info['turn_domain']
         self.turn_id = data_info['turn_id']
         self.dialog_history = data_info['dialog_history']
+        self.dialog_history_plain = data_info['dialog_history_plain']
+        self.turn_uttr_plain = data_info['turn_uttr_plain']
         self.turn_belief = data_info['turn_belief']
         self.gate = data_info['gate']
         self.turn_uttr = data_info['turn_uttr']
@@ -158,10 +159,11 @@ class Dataset(data.Dataset):
         turn_belief = self.turn_belief[index]
         gating_label = self.gate[index]
         turn_uttr = self.turn_uttr[index]
+        turn_uttr_plain = self.turn_uttr_plain[index]
         turn_domain = self.preprocess_domain(self.turn_domain[index])
         label = self.label[index]
         context = self.dialog_history[index]
-        context_plain = self.dialog_history[index]
+        context_plain = self.dialog_history_plain[index]
 
         item_info = {
             "ID": id_,
@@ -170,8 +172,10 @@ class Dataset(data.Dataset):
             "gate": gating_label,
             "context": context,
             "context_plain": context_plain,
-            "turn_uttr_plain": turn_uttr,
+            "turn_uttr": turn_uttr,
+            "turn_uttr_plain": turn_uttr_plain,
             "turn_domain": turn_domain,
+            "turn_domain_plain": self.turn_domain[index],
             "label": label,
         }
         return item_info
@@ -217,7 +221,7 @@ class Dataset(data.Dataset):
         return domains[turn_domain]
 
 
-def state_reorganize(dataset: dict, train_domain, test_domain, span_limit=10) -> [dict, dict]:
+def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
     """
     We apply dual strategy to address DST challenge in this study. That is, if the number of possible values of a slot
     is small than the parameter span_limit (default 10), we will treat the DST problem on the slot as a classification
@@ -232,7 +236,8 @@ def state_reorganize(dataset: dict, train_domain, test_domain, span_limit=10) ->
                 for span match slot, return the index of start and end word
         classify word index dict
     """
-    slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = dict(), dict(), dict(), dict()
+    slot_value_dict, slot_type_dict = dict(), dict()
+    span_limit = args['span_limit']
     fail_match = 0
     count = 0
 
@@ -256,7 +261,6 @@ def state_reorganize(dataset: dict, train_domain, test_domain, span_limit=10) ->
                         continue
                 if not slot_value_dict.__contains__(slot_name):
                     slot_value_dict[slot_name] = set()
-                    slot_name_idx_dict[slot_name] = slot_name_idx
                     slot_name_idx += 1
                 slot_value_dict[slot_name].add(slot_value)
 
@@ -265,18 +269,15 @@ def state_reorganize(dataset: dict, train_domain, test_domain, span_limit=10) ->
             slot_type_dict[slot_name] = 'span'
         else:
             slot_type_dict[slot_name] = 'classify'
-            slot_value_idx = 0
-            for slot_value in slot_value_dict[slot_name]:
-                if not (slot_value == 'none' or slot_value == 'dont care'):
-                    slot_value_idx_dict[slot_name+'-'+slot_value] = slot_value_idx
-                    slot_value_idx += 1
+        slot_value_dict[slot_name] = sorted(list(slot_value_dict[slot_name]))
 
     for key in dataset:
         part_of_data = dataset[key]
         for dialogue in part_of_data:
             turn_beliefs = dialogue['turn_belief']
-            dialogue['gate'] = np.zeros(len(slot_name_idx_dict))
-            dialogue['label'] = [[-1, -1] for _ in range(len(slot_name_idx_dict))]
+            dialogue['gate'], dialogue['label'] = {}, {}
+            for slot_name in slot_type_dict:
+                dialogue['gate'][slot_name], dialogue['label'][slot_name] = 0, [-1, -1]
             for turn_belief in turn_beliefs:
                 count += 1
                 slot_domain = turn_belief.split('-')[0]
@@ -288,35 +289,29 @@ def state_reorganize(dataset: dict, train_domain, test_domain, span_limit=10) ->
                 else:
                     if slot_domain not in test_domain:
                         continue
-                if slot_type_dict[slot_name] == 'classify':
-                    if slot_value == 'none':
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 0
-                    elif slot_value == 'dont care':
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 1
-                    else:
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 3
-                    if not (slot_value == 'none' or slot_value == 'dont care'):
-                        dialogue['label'][slot_name_idx_dict[slot_name]][0] = slot_value_idx_dict[turn_belief]
+                if slot_value == 'none':
+                    dialogue['gate'][slot_name] = 0
+                elif slot_value == 'dont care':
+                    dialogue['gate'][slot_name] = 1
                 else:
-                    if slot_value == 'none':
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 0
-                    elif slot_value == 'dont care':
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 1
-                    else:
-                        dialogue['gate'][slot_name_idx_dict[slot_name]] = 2
+                    dialogue['gate'][slot_name] = 2
 
+                if slot_type_dict[slot_name] == 'classify':
+                    if not (slot_value == 'none' or slot_value == 'dont care'):
+                        dialogue['label'][slot_name][0] = slot_value_dict[slot_name].index(turn_belief.split('-')[-1])
+                else:
                     if not (slot_value == 'none' or slot_value == 'dont care'):
                         start_idx = dialogue['dialog_history'].find(slot_value)
-                        end_idx = start_idx + 2 if start_idx != -1 else -1
-                        dialogue['label'][slot_name_idx_dict[slot_name]] = [start_idx, end_idx]
+                        end_idx = start_idx + len(slot_value) if start_idx != -1 else -1
+                        dialogue['label'][slot_name] = [start_idx, end_idx]
                         if start_idx == -1:
                             print(dialogue['dialog_history'])
                             print(slot_value)
                             fail_match += 1
                     else:
-                        dialogue['label'][slot_name_idx_dict[slot_name]] = -1, -1
-    print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match/count))
-    return dataset, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict
+                        dialogue['label'][slot_name] = -1, -1
+    print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
+    return dataset, slot_value_dict, slot_type_dict
 
 
 def dialogue_filter(train_file_path, dev_file_path, test_file_path, train_domain, test_domain):
@@ -372,9 +367,14 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
             for ti, turn in enumerate(dial_dict["dialogue"]):
                 turn_domain = turn["domain"]
                 turn_id = turn["turn_idx"]
-                turn_uttr = utt_format(turn["system_transcript"]) + " ; " + utt_format(turn["transcript"])
-                turn_uttr_strip = turn_uttr.strip()
-                dialog_history += (utt_format(turn["system_transcript"])+" ; "+utt_format(turn["transcript"])+" ;")
+                if ti == 0:
+                    turn_uttr = utt_format(turn["transcript"] + " [SEP] ")
+                    turn_uttr_strip = turn_uttr.strip()
+                    dialog_history += utt_format(turn["transcript"] + " [SEP] ")
+                else:
+                    turn_uttr = utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP] ")
+                    turn_uttr_strip = turn_uttr.strip()
+                    dialog_history += utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP] ")
                 turn_belief_dict = bs_format(fix_general_label_error(turn["belief_state"], False, all_slots))
                 turn_belief_list = [str(k) + '-' + str(v) for k, v in turn_belief_dict.items()]
                 source_text = dialog_history.strip()
@@ -384,16 +384,15 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
                     "domains": dial_dict["domains"],
                     "turn_domain": turn_domain,
                     "turn_id": turn_id,
-                    "dialog_history": source_text,
+                    "dialog_history": '[CLS] ' + source_text,
                     "turn_belief": turn_belief_list,
-                    "turn_uttr": turn_uttr_strip,
+                    "turn_uttr": '[CLS] ' + turn_uttr_strip,
                 }
                 data_dict[key].append(data_detail)
 
                 if max_history_len < len(source_text.split()):
                     max_history_len = len(source_text.split())
-    print('domain count')
-    print(domain_counter)
+    print('domain count: {}'.format(domain_counter))
     print('corpus loaded')
     return data_dict, max_history_len
 
@@ -425,6 +424,7 @@ class WordIndexStat:
     Check 20210921
     build dataset specific word index dict
     """
+
     def __init__(self):
         self.word2index = {PAD: PAD_token, SOS: SOS_token, EOS: EOS_token, UNK: UNK_token}
         self.index2word = {PAD_token: PAD, SOS_token: SOS, EOS_token: EOS, UNK_token: UNK}
@@ -490,7 +490,7 @@ def load_glove_embeddings(word_index_dict):
         for line in f:
             split_line = line.split()
             word = split_line[0]
-            word_embedding = np.array(split_line[len(split_line)-300:], dtype=np.float64)
+            word_embedding = np.array(split_line[len(split_line) - 300:], dtype=np.float64)
             if len(word_embedding) != 300:
                 print(word)
                 print(len(split_line))
@@ -558,7 +558,7 @@ def graph_embeddings_alignment(entity_embed_dict, word_index_dict):
     return embedding_mat
 
 
-def load_graph_embeddings(embed_path, word_net_obj):
+def load_graph_embeddings(embed_path, word_net_path):
     """
         load the embeddings of words learned from a semantic knowledge graph (WordNet)
         The embeddings of out-of-vocab word in the word_index_dict will be assigned as UNK vector
@@ -567,6 +567,7 @@ def load_graph_embeddings(embed_path, word_net_obj):
     """
     entity_embed_dict = {}
     relation_embed_dict = {}
+    word_net_obj = pickle.load(open(word_net_path, 'rb'))
     idx_relation_dict = word_net_obj['idx_relation_dict']
     idx_entity_dict = word_net_obj['idx_word_dict']
     entity_embed = torch.load(embed_path)['model_state_dict']['entities_emb.weight'].cpu().numpy()
@@ -590,8 +591,8 @@ def tokenize(string_list, word_index_dict):
 
 
 def fix_general_label_error(labels, type_, slots):
-    label_dict = dict([(l[0], l[1]) for l in labels]) if type_ else dict(
-        [(l["slots"][0][0], l["slots"][0][1]) for l in labels])
+    label_dict = dict([(l_[0], l_[1]) for l_ in labels]) if type_ else dict(
+        [(l_["slots"][0][0], l_["slots"][0][1]) for l_ in labels])
 
     general_typo = {
         # type
@@ -1018,7 +1019,7 @@ def bs_format(bs):
                 v = "galleria"
             if v == "cambridge artw2orks":
                 v = "cambridge artworks"
-        new_bs[d+'-'+s] = v
+        new_bs[d + '-' + s] = v
     return new_bs
 
 
@@ -1056,14 +1057,13 @@ def utt_format(utt):
 
 
 def main():
-    file_path = os.path.abspath('../resource/multiwoz/cache.pkl')
-    train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, slot_value_idx_dict, slot_name_idx_dict = \
-        prepare_data(True, file_path)
-    wordnet_embedding_path = os.path.abspath('../resource/transe_checkpoint/WordNet_2000_checkpoint.tar')
-    wordnet_path = os.path.abspath('../resource/wordnet/wordnet_KG.pkl')
+    file_path = args['cache_path']
+    train, dev, test, word_index_stat, slot_value_dict, slot_type_dict = prepare_data(False, file_path)
 
-    wordnet_obj = pkl.load(open(wordnet_path, 'rb'))
-    entity_embed_dict, relation_embed_dict = load_graph_embeddings(wordnet_embedding_path, wordnet_obj)
+    wordnet_embedding_path = args['wordnet_embedding_path']
+    wordnet_path = args['wordnet_path']
+
+    entity_embed_dict, relation_embed_dict = load_graph_embeddings(wordnet_embedding_path, wordnet_path)
     graph_embeddings_alignment(entity_embed_dict, word_index_stat.word2index)
     print('util execute accomplished')
 

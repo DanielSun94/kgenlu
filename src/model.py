@@ -1,4 +1,6 @@
 import os
+
+import torch
 from tqdm import tqdm
 from torch import nn
 from torch.nn.functional import softmax
@@ -7,6 +9,8 @@ from torch.nn import TransformerEncoderLayer, TransformerEncoder, LayerNorm
 from multiwoz_util import PAD_token, prepare_data, load_graph_embeddings, graph_embeddings_alignment
 from multiwoz_config import args, DEVICE
 import pickle
+from torch.optim import lr_scheduler
+from torch import optim
 
 
 class KGENLU(nn.Module):
@@ -91,13 +95,13 @@ class KGENLU(nn.Module):
         predict_gate = {}
         predict_dict = {}
         for slot_name in label:
-            predict_gate[slot_name] = softmax(self.gate[slot_name](encode[0, :, :]), dim=1)
+            predict_gate[slot_name] = self.gate[slot_name](encode[0, :, :])
             slot_type = self.slot_type_dict[slot_name]
             weight = self.slot_parameter[slot_name]
             if slot_type == 'classify':
-                predict_dict[slot_name] = softmax(weight(encode[0, :, :]), dim=1)
+                predict_dict[slot_name] = weight(encode[0, :, :])
             else:
-                predict_dict[slot_name] = softmax(weight(encode), dim=0)
+                predict_dict[slot_name] = weight(encode)
         return predict_gate, predict_dict
 
 
@@ -123,17 +127,58 @@ class Encoder(nn.Module):
         return encode
 
 
-def train_process(dataset, model):
+def train_process(dataset, model, epoch):
     dataset = tqdm(enumerate(dataset), total=len(dataset))
+    cross_entropy = nn.CrossEntropyLoss(ignore_index=-1)
+    optimizer = optim.Adam(model.parameters(), lr=args['learning_rate'])
+
+    full_loss = 0
     for i, batch in dataset:
-        model(batch)
+        slot_type_dict = batch['slot_type_dict'][0]
+        optimizer.zero_grad()
+        predict_gate_logits, predict_dict_logits = model(batch)
+        batch_loss = 0
+        for slot_name in predict_gate_logits:
+            gate_slot_predict = predict_gate_logits[slot_name]
+            gate_slot_label = torch.tensor(batch['gate'][slot_name], dtype=torch.long).to(DEVICE)
+            value_slot_predict = predict_dict_logits[slot_name]
+            value_slot_label = torch.tensor(batch['label'][slot_name], dtype=torch.long).to(DEVICE)
+
+            gate_loss = cross_entropy(gate_slot_predict, gate_slot_label)
+            if batch['slot_type_dict'][0][slot_name] == 'classify':
+                value_loss = cross_entropy(value_slot_predict, value_slot_label)
+            else:
+                value_loss = 0.5 * (cross_entropy(value_slot_predict[:, :, 0].transpose(1, 0), value_slot_label[:, 0]) +
+                                    cross_entropy(value_slot_predict[:, :, 1].transpose(1, 0), value_slot_label[:, 1]))
+            batch_loss += value_loss + gate_loss
+        batch_loss.backward()
+        optimizer.step()
+
+        full_loss += batch_loss
+        # normalized probability
+        predict_gate, predict_dict = {}, {}
+        for slot_name in predict_gate:
+            predict_gate[slot_name] = softmax(predict_gate_logits[slot_name], dim=1)
+            if slot_type_dict[slot_name] == 'classify':
+                predict_dict[slot_name] = softmax(predict_dict[slot_name], dim=1)
+            else:
+                predict_dict[slot_name] = softmax(predict_dict[slot_name], dim=0)
+    print('epoch: {}, average_loss: {}'.format(epoch, full_loss/dataset.total))
 
 
 def validation_and_test_process(dataset, model, slot_info_dict):
     predicted_result = []
     dataset = tqdm(enumerate(dataset), total=len(dataset))
     for i, batch in dataset:
-        predict_gate, predict_dict = model(batch)
+        predict_gate_logits, predict_logits_dict = model(batch)
+        # normalized probability
+        predict_gate, predict_dict = {}, {}
+        for slot_name in predict_gate_logits:
+            predict_gate[slot_name] = softmax(predict_gate_logits[slot_name], dim=1)
+            if slot_info_dict['slot_type_dict'][slot_name] == 'classify':
+                predict_dict[slot_name] = softmax(predict_logits_dict[slot_name], dim=1)
+            else:
+                predict_dict[slot_name] = softmax(predict_logits_dict[slot_name], dim=0)
         predicted_result.append(evaluation_batch(predict_gate, predict_dict, batch, slot_info_dict))
     return predicted_result
 
@@ -145,14 +190,13 @@ def main():
     slot_info_dict = {'slot_value_dict': slot_value_dict, 'slot_type_dict': slot_type_dict}
     model = KGENLU(word_index_stat.word2index, slot_info_dict)
 
-    for epoch in range(2):
+    for epoch in range(100):
         print("Epoch :{}".format(epoch))
         # Run the train function
-        train_process(train, model)
+        train_process(train, model, epoch)
         validation_result = validation_and_test_process(val, model, slot_info_dict)
-        test_result = validation_and_test_process(test, model, slot_info_dict)
-        comprehensive_evaluation(validation_result, slot_info_dict, 'validation')
-        comprehensive_evaluation(test_result, slot_info_dict, 'test')
+        # test_result = validation_and_test_process(test, model, slot_info_dict)
+        comprehensive_evaluation(validation_result, slot_info_dict, 'validation', epoch)
 
 
 if __name__ == '__main__':

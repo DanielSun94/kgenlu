@@ -18,12 +18,13 @@ multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
 multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
 parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
+# parser.add_argument('-clip', '--clip', help='gradient clip', default=10, required=False)
 parser.add_argument('-sl', '--span_limit', help='classify slot / span slot threshold', default=10, required=False)
 parser.add_argument('-esp', '--evaluation_save_path', help='evaluation save path', type=str, required=False,
                     default=os.path.abspath('../resource/evaluation/eval_{}.csv'.format(current_time)))
 
 # Setting
-parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.01, required=False)
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.1, required=False)
 parser.add_argument('-bs', '--batch_size', help='training batch size', default=32, required=False)
 parser.add_argument('-trd', '--train_domain', help='training domain',
                     default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)

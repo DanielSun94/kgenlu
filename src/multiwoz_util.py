@@ -39,9 +39,9 @@ def prepare_data(read_from_cache, file_path):
         data_dict, slot_value_dict, slot_type_dict = \
             state_reorganize(data_dict, args['train_domain'], args['test_domain'])
         data_dict = tokenize_utterance(data_dict, word_index_stat)
-        train = get_sequence(data_dict['train'], batch_size, True)
-        dev = get_sequence(data_dict['dev'], batch_size, True)
-        test = get_sequence(data_dict['test'], batch_size, True)
+        train = get_sequence(data_dict['train'], batch_size, slot_value_dict, slot_type_dict, True)
+        dev = get_sequence(data_dict['dev'], batch_size, slot_value_dict, slot_type_dict, True)
+        test = get_sequence(data_dict['test'], batch_size, slot_value_dict, slot_type_dict, True)
         pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, max_utterance_len],
                     open(file_path, 'wb'))
     load_glove_embeddings(word_index_stat.word2index)
@@ -70,7 +70,7 @@ def tokenize_utterance(data_dict, word_index_stat):
     return data_dict
 
 
-def get_sequence(pairs, batch_size, sample_type):
+def get_sequence(pairs, batch_size, slot_value_dict, slot_type_dict, sample_type):
     data_info = {}
     data_keys = pairs[0].keys()
     for k in data_keys:
@@ -80,7 +80,7 @@ def get_sequence(pairs, batch_size, sample_type):
         for k in data_keys:
             data_info[k].append(pair[k])
 
-    dataset = Dataset(data_info)
+    dataset = Dataset(data_info, slot_value_dict, slot_type_dict)
 
     if args["imbalance_sampler"] and sample_type:
         data_loader = torch.utils.data.DataLoader(dataset=dataset,
@@ -118,27 +118,52 @@ def collate_fn(data_):
     for key in data_[0].keys():
         item_info[key] = [d[key] for d in data_]
 
-    label = item_info['label']
-    label_reorganize = {}
-    for item in label:
-        for key in item:
-            if not label_reorganize.__contains__(key):
-                label_reorganize[key] = []
-            label_reorganize[key].append(item[key])
-    item_info['label'] = label_reorganize
-
-    # merge sequences
     src_seqs, src_lengths = merge(item_info['context'])
-
     item_info["context"] = src_seqs
     item_info["context_len"] = src_lengths
+
+    # label reorganize
+    label = item_info['label']
+    slot_type_dict = item_info['slot_type_dict'][0]
+    slot_value_dict = item_info['slot_value_dict'][0]
+    label_reorganize = {}
+    for sample in label:
+        for slot_name in sample:
+            if not label_reorganize.__contains__(slot_name):
+                label_reorganize[slot_name] = []
+            if slot_type_dict[slot_name] == 'classify':
+                if sample[slot_name] is not None:
+                    label = sample[slot_name]
+                else:
+                    label =-1
+            elif slot_type_dict[slot_name] == 'span':
+                if sample[slot_name] is not None:
+                    label = sample[slot_name]
+                else:
+                    label = -1, -1
+            else:
+                ValueError('')
+            label_reorganize[slot_name].append(label)
+    for slot_name in label_reorganize:
+        label_reorganize[slot_name] = np.array(label_reorganize[slot_name])
+    item_info['label'] = label_reorganize
+
+    # gate reorganize
+    gate = item_info['gate']
+    gate_reorganize = {}
+    for index, sample in enumerate(gate):
+        for slot_name in sample:
+            if not gate_reorganize.__contains__(slot_name):
+                gate_reorganize[slot_name] = np.zeros(len(gate))
+            gate_reorganize[slot_name][index] = sample[slot_name]
+    item_info['gate'] = gate_reorganize
     return item_info
 
 
 class Dataset(data.Dataset):
     """Custom data.Dataset compatible with data.DataLoader."""
 
-    def __init__(self, data_info):
+    def __init__(self, data_info, slot_value_dict, slot_type_dict):
         """Reads source and target sequences from txt files."""
         self.ID = data_info['ID']
         self.turn_domain = data_info['turn_domain']
@@ -150,6 +175,8 @@ class Dataset(data.Dataset):
         self.gate = data_info['gate']
         self.turn_uttr = data_info['turn_uttr']
         self.label = data_info["label"]
+        self.slot_value_dict = slot_value_dict
+        self.slot_type_dict = slot_type_dict
         self.num_total_seqs = len(self.dialog_history)
 
     def __getitem__(self, index):
@@ -175,6 +202,8 @@ class Dataset(data.Dataset):
             "turn_uttr": turn_uttr,
             "turn_uttr_plain": turn_uttr_plain,
             "turn_domain": turn_domain,
+            'slot_type_dict': self.slot_type_dict,
+            'slot_value_dict': self.slot_value_dict,
             "turn_domain_plain": self.turn_domain[index],
             "label": label,
         }
@@ -190,29 +219,6 @@ class Dataset(data.Dataset):
         story = torch.Tensor(story)
         return story
 
-    @staticmethod
-    def preprocess_slot(sequence, word2idx):
-        """Converts words to ids."""
-        story = []
-        for value in sequence:
-            v = [word2idx[word] if word in word2idx else UNK_token for word in value.split()] + [EOS_token]
-            story.append(v)
-        # story = torch.Tensor(story)
-        return story
-
-    @staticmethod
-    def preprocess_memory(sequence, word2idx):
-        """Converts words to ids."""
-        story = []
-        for value in sequence:
-            d, s, v = value
-            s = s.replace("book", "").strip()
-            # separate each word in value to different memory slot
-            for wi, vw in enumerate(v.split()):
-                idx = [word2idx[word] if word in word2idx else UNK_token for word in [d, s, "t{}".format(wi), vw]]
-                story.append(idx)
-        story = torch.Tensor(story)
-        return story
 
     @staticmethod
     def preprocess_domain(turn_domain):
@@ -277,7 +283,7 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
             turn_beliefs = dialogue['turn_belief']
             dialogue['gate'], dialogue['label'] = {}, {}
             for slot_name in slot_type_dict:
-                dialogue['gate'][slot_name], dialogue['label'][slot_name] = 0, [-1, -1]
+                dialogue['gate'][slot_name], dialogue['label'][slot_name] = 0, None
             for turn_belief in turn_beliefs:
                 count += 1
                 slot_domain = turn_belief.split('-')[0]
@@ -298,18 +304,20 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
 
                 if slot_type_dict[slot_name] == 'classify':
                     if not (slot_value == 'none' or slot_value == 'dont care'):
-                        dialogue['label'][slot_name][0] = slot_value_dict[slot_name].index(turn_belief.split('-')[-1])
+                        dialogue['label'][slot_name] = slot_value_dict[slot_name].index(turn_belief.split('-')[-1])
                 else:
                     if not (slot_value == 'none' or slot_value == 'dont care'):
-                        start_idx = dialogue['dialog_history'].find(slot_value)
-                        end_idx = start_idx + len(slot_value) if start_idx != -1 else -1
+                        try:
+                            start_idx = dialogue['dialog_history'].split(' ').index(slot_value)
+                            end_idx = start_idx + len(slot_value.split(' '))
+                        except ValueError:
+                            start_idx = -1
+                            end_idx = -1
                         dialogue['label'][slot_name] = [start_idx, end_idx]
                         if start_idx == -1:
                             print(dialogue['dialog_history'])
                             print(slot_value)
                             fail_match += 1
-                    else:
-                        dialogue['label'][slot_name] = -1, -1
     print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
     return dataset, slot_value_dict, slot_type_dict
 

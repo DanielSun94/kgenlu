@@ -6,8 +6,8 @@ import numpy as np
 import os
 import pickle
 import torch
-from multiwoz_config import args, UNK, PAD, SOS, EOS, EXPERIMENT_DOMAINS, UNK_token, PAD_token, SOS_token, \
-    EOS_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, DEVICE
+from multiwoz_config import args, UNK, PAD, CLS, SEP, EXPERIMENT_DOMAINS, UNK_token, PAD_token, CLS_token, \
+    SEP_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, DEVICE
 import json
 import re
 import torch.utils.data as data
@@ -104,6 +104,7 @@ def collate_fn(data_):
         """
         lengths = [len(seq) for seq in sequences]
         max_len = 1 if max(lengths) == 0 else max(lengths)
+        assert PAD_token == 1
         padded_seqs = torch.ones(len(sequences), max_len).long()
         for i, seq in enumerate(sequences):
             seq = torch.Tensor(seq)
@@ -123,12 +124,12 @@ def collate_fn(data_):
     item_info["context_len"] = src_lengths
 
     # label reorganize
-    label = item_info['label']
+    label_origin = item_info['label']
     slot_type_dict = item_info['slot_type_dict'][0]
-    slot_value_dict = item_info['slot_value_dict'][0]
     label_reorganize = {}
-    for sample in label:
+    for sample in label_origin:
         for slot_name in sample:
+            label = None
             if not label_reorganize.__contains__(slot_name):
                 label_reorganize[slot_name] = []
             if slot_type_dict[slot_name] == 'classify':
@@ -143,6 +144,7 @@ def collate_fn(data_):
                     label = -1, -1
             else:
                 ValueError('')
+            assert label is not None
             label_reorganize[slot_name].append(label)
     for slot_name in label_reorganize:
         label_reorganize[slot_name] = np.array(label_reorganize[slot_name])
@@ -236,7 +238,7 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
     Of note, count the fail cases of span match slot (the value does not exist in the utterance)
     :return:
         new_data, a extension data dict with
-            gate: 0-3, indicating the type of gate of a turn (not mention, dont care, span, classify)
+            gate: 0-3, indicating the type of gate of a turn (not mention, dont care, hit)
             state label: indicating the label of current turn:
                 for classify slot, return the index of label
                 for span match slot, return the index of start and end word
@@ -268,7 +270,8 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                 if not slot_value_dict.__contains__(slot_name):
                     slot_value_dict[slot_name] = set()
                     slot_name_idx += 1
-                slot_value_dict[slot_name].add(slot_value)
+                if slot_value != 'dont care' and slot_value != 'none':
+                    slot_value_dict[slot_name].add(slot_value)
 
     for slot_name in slot_value_dict:
         if len(slot_value_dict[slot_name]) >= span_limit:
@@ -315,8 +318,8 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                             end_idx = -1
                         dialogue['label'][slot_name] = [start_idx, end_idx]
                         if start_idx == -1:
-                            print(dialogue['dialog_history'])
-                            print(slot_value)
+                            # print(dialogue['dialog_history'])
+                            # print(slot_value)
                             fail_match += 1
     print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
     return dataset, slot_value_dict, slot_type_dict
@@ -408,7 +411,6 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
 def create_word_index_mapping(all_slots, train_file, dev_file, test_file, valid_idx_set):
     """
     check 20210924
-    TBD: add domain filter
     """
     word_index_stat = WordIndexStat()
     word_index_stat.index_words(all_slots, 'slot')
@@ -434,8 +436,8 @@ class WordIndexStat:
     """
 
     def __init__(self):
-        self.word2index = {PAD: PAD_token, SOS: SOS_token, EOS: EOS_token, UNK: UNK_token}
-        self.index2word = {PAD_token: PAD, SOS_token: SOS, EOS_token: EOS, UNK_token: UNK}
+        self.word2index = {PAD: PAD_token, CLS: CLS_token, SEP: SEP_token, UNK: UNK_token}
+        self.index2word = {PAD_token: PAD, CLS_token: CLS, SEP_token: SEP, UNK_token: UNK}
         self.n_words = len(self.index2word)
 
     def index_words(self, sent, data_type):
@@ -487,7 +489,7 @@ def load_glove_embeddings(word_index_dict):
     if os.path.exists(save_path):
         return pickle.load(open(save_path, 'rb'))
 
-    for key in {UNK, SOS, EOS, PAD}:
+    for key in {UNK, SEP, CLS, PAD}:
         assert key in word_index_dict
 
     print("Loading Glove Model")
@@ -515,8 +517,8 @@ def load_glove_embeddings(word_index_dict):
     unk_embedding = np.average(glove_embedding, axis=0)
     # I did not find tutorial on how to initialize embedding of sos and eos
     # So I just use zero-mean random vectors
-    sos_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
-    eos_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
+    sep_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
+    cls_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
 
     embedding_mat = np.zeros([len(word_index_dict), embedding_dimension])
     for word in word_index_dict:
@@ -526,10 +528,10 @@ def load_glove_embeddings(word_index_dict):
         else:
             if word == PAD:
                 embedding_mat[idx] = pad_embedding
-            elif word == SOS:
-                embedding_mat[idx] = sos_embedding
-            elif word == EOS:
-                embedding_mat[idx] = eos_embedding
+            elif word == SEP:
+                embedding_mat[idx] = sep_embedding
+            elif word == CLS:
+                embedding_mat[idx] = cls_embedding
             else:
                 embedding_mat[idx] = unk_embedding
 
@@ -546,8 +548,8 @@ def graph_embeddings_alignment(entity_embed_dict, word_index_dict):
     unk_embedding = np.average(unk_embedding_list, axis=0)
     # I did not find tutorial on how to initialize embedding of sos and eos
     # So I just use zero-mean random vectors
-    sos_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
-    eos_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
+    cls_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
+    sep_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
 
     embedding_mat = np.zeros([len(word_index_dict), embedding_dimension])
     for word in word_index_dict:
@@ -557,10 +559,10 @@ def graph_embeddings_alignment(entity_embed_dict, word_index_dict):
         else:
             if word == PAD:
                 embedding_mat[idx] = pad_embedding
-            elif word == SOS:
-                embedding_mat[idx] = sos_embedding
-            elif word == EOS:
-                embedding_mat[idx] = eos_embedding
+            elif word == CLS:
+                embedding_mat[idx] = cls_embedding
+            elif word == SEP:
+                embedding_mat[idx] = sep_embedding
             else:
                 embedding_mat[idx] = unk_embedding
     return embedding_mat

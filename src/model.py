@@ -1,15 +1,14 @@
 import os
-
+import math
 import torch
 from tqdm import tqdm
 from torch import nn
 from torch.nn.functional import softmax
 from evaluation import evaluation_batch, comprehensive_evaluation
 from torch.nn import TransformerEncoderLayer, TransformerEncoder, LayerNorm
-from multiwoz_util import PAD_token, prepare_data, load_graph_embeddings, graph_embeddings_alignment
+from multiwoz_util import prepare_data, load_graph_embeddings, graph_embeddings_alignment
 from multiwoz_config import args, DEVICE
 import pickle
-from torch.optim import lr_scheduler
 from torch import optim
 
 
@@ -33,19 +32,20 @@ class KGENLU(nn.Module):
 
         # Gate dict
         # 3 means None, Don't Care, Hit
-        self.gate, self.slot_type_dict, self.classify_slot_index_value_dict, self.slot_parameter = {}, {}, {}, {}
+        self.gate, self.slot_type_dict, self.classify_slot_index_value_dict, self.slot_parameter = \
+                nn.ModuleDict(), {}, {}, nn.ModuleDict()
         self.slot_initialize(slot_info_dict)
 
         # load pretrained word embedding
-        self.embedding = nn.Embedding(self.vocab_size, self.embedding_dim, padding_idx=PAD_token).to(DEVICE)
+        self.embedding = nn.Embedding(self.vocab_size, self.embedding_dim).to(DEVICE)
         if args["load_embedding"]:
-            e = pickle.load(open(os.path.join(args['aligned_embedding_path'],
-                                              'glove_42B_embed_{}'.format(self.vocab_size)), 'rb'))
+            e = pickle.load(open(
+                os.path.join(args['aligned_embedding_path'], 'glove_42B_embed_{}'.format(self.vocab_size)), 'rb'))
             new = self.embedding.weight.data.new
             self.embedding.weight.data.copy_(new(e))
             print('Pretrained Embedding Loaded')
         else:
-            nn.init.xavier_normal(self.embedding)
+            nn.init.xavier_normal_(self.embedding.weight)
             print('Training Embedding from scratch')
         if args["update_embedding"]:
             self.embedding.weight.requires_grad = True
@@ -94,15 +94,39 @@ class KGENLU(nn.Module):
 
         predict_gate = {}
         predict_dict = {}
+
+        # Choose the output of the first token ([CLS]) to predict gate and classification)
         for slot_name in label:
             predict_gate[slot_name] = self.gate[slot_name](encode[0, :, :])
-            slot_type = self.slot_type_dict[slot_name]
-            weight = self.slot_parameter[slot_name]
+            slot_type, weight = self.slot_type_dict[slot_name], self.slot_parameter[slot_name]
             if slot_type == 'classify':
                 predict_dict[slot_name] = weight(encode[0, :, :])
             else:
                 predict_dict[slot_name] = weight(encode)
         return predict_gate, predict_dict
+
+
+class PositionalEncoding(nn.Module):
+
+    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 1000):
+        # 分别给d_model的每个维度添加略微存在差异的positional信息（每个维度的三角函数周期，sin/cos存在略微的差别）
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position = torch.arange(max_len).unsqueeze(1)
+        # for numerical stable
+        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        """
+        Args:
+            x: Tensor, shape [seq_len, batch_size, embedding_dim]
+        """
+        x = x + self.pe[:x.size(0)]
+        return self.dropout(x)
 
 
 class Encoder(nn.Module):
@@ -115,7 +139,8 @@ class Encoder(nn.Module):
         self.vocab_size = vocab_size
         self.hidden_size = hidden_size
         self.dropout = dropout
-
+        self.d_model = d_model
+        self.pos_encoder = PositionalEncoding(d_model, dropout).to(DEVICE)
         self.encoder = TransformerEncoder(
             TransformerEncoderLayer(d_model, n_head, dim_feed_forward, dropout, activation),
             num_encoder_layers,
@@ -123,18 +148,15 @@ class Encoder(nn.Module):
         ).to(DEVICE)
 
     def forward(self, context):
-        encode = self.encoder(context)
+        encode = self.encoder(context) * math.sqrt(self.d_model)
+        encode = self.pos_encoder(encode)
         return encode
 
 
-def train_process(dataset, model, epoch):
+def train_process(dataset, model, optimizer, cross_entropy, epoch):
     dataset = tqdm(enumerate(dataset), total=len(dataset))
-    cross_entropy = nn.CrossEntropyLoss(ignore_index=-1)
-    optimizer = optim.Adam(model.parameters(), lr=args['learning_rate'])
-
     full_loss = 0
     for i, batch in dataset:
-        slot_type_dict = batch['slot_type_dict'][0]
         optimizer.zero_grad()
         predict_gate_logits, predict_dict_logits = model(batch)
         batch_loss = 0
@@ -152,17 +174,9 @@ def train_process(dataset, model, epoch):
                                     cross_entropy(value_slot_predict[:, :, 1].transpose(1, 0), value_slot_label[:, 1]))
             batch_loss += value_loss + gate_loss
         batch_loss.backward()
-        optimizer.step()
 
+        optimizer.step()
         full_loss += batch_loss
-        # normalized probability
-        predict_gate, predict_dict = {}, {}
-        for slot_name in predict_gate:
-            predict_gate[slot_name] = softmax(predict_gate_logits[slot_name], dim=1)
-            if slot_type_dict[slot_name] == 'classify':
-                predict_dict[slot_name] = softmax(predict_dict[slot_name], dim=1)
-            else:
-                predict_dict[slot_name] = softmax(predict_dict[slot_name], dim=0)
     print('epoch: {}, average_loss: {}'.format(epoch, full_loss/dataset.total))
 
 
@@ -189,14 +203,23 @@ def main():
         prepare_data(read_from_cache=True, file_path=file_path)
     slot_info_dict = {'slot_value_dict': slot_value_dict, 'slot_type_dict': slot_type_dict}
     model = KGENLU(word_index_stat.word2index, slot_info_dict)
+    cross_entropy = nn.CrossEntropyLoss(ignore_index=-1)
+    learning_rate = args['learning_rate']
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.9)
 
-    for epoch in range(100):
+    for epoch in range(200):
         print("Epoch :{}".format(epoch))
         # Run the train function
-        train_process(train, model, epoch)
+        model.train()
+        train_process(train, model, optimizer, cross_entropy, epoch)
+        model.eval()
+
         validation_result = validation_and_test_process(val, model, slot_info_dict)
-        # test_result = validation_and_test_process(test, model, slot_info_dict)
         comprehensive_evaluation(validation_result, slot_info_dict, 'validation', epoch)
+        # test_result = validation_and_test_process(test, model, slot_info_dict)
+        # comprehensive_evaluation(test_result, slot_info_dict, 'test', epoch)
+        scheduler.step()
 
 
 if __name__ == '__main__':

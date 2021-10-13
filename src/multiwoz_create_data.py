@@ -5,10 +5,11 @@ import re
 from typing import List, Any
 import difflib
 import numpy as np
-from multiwoz_config import multiwoz_data_folder, MAX_LENGTH, IGNORE_KEYS_IN_GOAL
+from multiwoz_config import multiwoz_data_folder, MAX_LENGTH
 
 np.set_printoptions(precision=3)
 np.random.seed(2)
+IGNORE_KEYS_IN_GOAL = ['eod', 'topic', 'messageLen', 'message']
 
 
 """
@@ -111,20 +112,20 @@ def normalize(text, clean_value=True):
     # insert white space for 's
     text = insertSpace('\'s', text)
 
-    # replace it's, doesn't, you'd ... etc
+    # replace it's, does't, you'd ... etc
     text = re.sub('^\'', '', text)
     text = re.sub('\'$', '', text)
     text = re.sub('\'\s', ' ', text)
     text = re.sub('\s\'', ' ', text)
-    for from_x, tox in replacements:
+    for from_x, to_x in replacements:
         text = ' ' + text + ' '
-        text = text.replace(from_x, tox)[1:-1]
+        text = text.replace(from_x, to_x)[1:-1]
 
     # remove multiple spaces
     text = re.sub(' +', ' ', text)
 
     # concatenate numbers
-    # tmp = text
+    tmp = text
     tokens = text.split()
     i = 1
     while i < len(tokens):
@@ -151,7 +152,6 @@ def fixDelex(filename, data, data2, idx, idx_acts):
         return data
 
     # and not isinstance(turn, unicode):
-    # 看上去下面这段代码没啥用,其实运行不到
     if not isinstance(turn, str):
         for k, act in turn.items():
             if 'Attraction' in k:
@@ -175,8 +175,8 @@ def fixDelex(filename, data, data2, idx, idx_acts):
 
 def get_dialog_act(filename, _, data2, __, idx_acts):
     """
-    Given system dialogue acts fix automatic delexicalization.
-    如果找不到对应的act就直接返回空act
+    Given system dialogue acts fix automatic delexicalization
+    Only useful in NLP generation problem
     """
     acts = []
     if data2.__contains__(filename.strip('.json')) and data2[filename.strip('.json')].__contains__(str(idx_acts)):
@@ -202,13 +202,18 @@ def get_dialog_act(filename, _, data2, __, idx_acts):
 
 def get_summary_b_state(b_state, get_domain_=False):
     """
-    Based on the m turk annotations we form multi-domain belief state
+    We form structurized multi-domain belief state from unstructured b_state when get_domain_ is false
+    or get active domain according to the b_state when get_domain_ is True
+
+    get_domain_ is false
     此处一共存在7个domain，book中总计存在15个slot(包括booked和其他信息)，因此一共存在15次append
     7个domain中存在24个semi值，每个semi值用3-element的list表达，因此存在72个element被插入
     7个domain每个还需要一个ele来表明是否activate，因此存在7个element被插入
     因此一个utterance的state可以用一个94维的二值向量表示，其中每个element都有特定的语义
+
+    book 和 semi的区别，看上去是semi中的slot是可以置为don't care，而book中的slot不可以
     """
-    domains = [u'taxi', u'restaurant',  u'hospital', u'hotel', u'attraction', u'train', u'police']
+    domains = ['taxi', 'restaurant', 'hospital', 'hotel', 'attraction', 'train', 'police']
     summary_b_state = []
     summary_b_value = []
     active_domain = []
@@ -232,7 +237,7 @@ def get_summary_b_state(b_state, get_domain_=False):
                 else:
                     booking.append(0)
         # 按照道理来讲slot应该是完整结构化的。
-        # 但是在train 这里稍微有些例外，book中应当存在people和ticket两个element，但是大部分utterance中都存在缺漏（主要是有一个没写）
+        # 但是在train 这里稍微有些例外，book中应当存在people和ticket两个element，但是大部分utterance中都存在缺漏
         # 因此如果缺了，就补上，以保证结构化
         if domain == 'train':
             if 'people' not in b_state[domain]['book'].keys():
@@ -243,6 +248,7 @@ def get_summary_b_state(b_state, get_domain_=False):
 
         for slot in b_state[domain]['semi']:
             slot_enc = [0, 0, 0]  # not mentioned, dontcare, filled
+            # not mentioned 也是一种形式的提到，如果真的是完全不在意会置空
             if b_state[domain]['semi'][slot] == 'not mentioned':
                 slot_enc[0] = 1
             elif b_state[domain]['semi'][slot] in ['dont care', 'dontcare', "don't care", "do not care"]:
@@ -251,6 +257,8 @@ def get_summary_b_state(b_state, get_domain_=False):
                 summary_b_value.append(["{}-{}".format(domain, slot.strip().lower()), "dontcare"])
             elif b_state[domain]['semi'][slot]:
                 # (["semi", domain, slot, b_state[domain]['semi'][slot]])
+                # 不知道为什么，所有的相关模型的create代码都漏了这个设2为1的代码段
+                slot_enc[2] = 1
                 summary_b_value.append(["{}-{}".format(domain, slot.strip().lower()),
                                         normalize(b_state[domain]['semi'][slot].strip().lower(), False)])
             if slot_enc != [0, 0, 0]:
@@ -275,36 +283,36 @@ def get_summary_b_state(b_state, get_domain_=False):
 def analyze_dialogue(dialogue, max_len):
     """
     Cleaning procedure for all kinds of errors in text and annotation.
+    注意，Multiwoz是一个偶数句子的对话，是以user, system一次对话为一个turn完成的。
     """
-    d = dialogue
     # do all the necessary postprocessing
-    if len(d['log']) % 2 != 0:
+    if len(dialogue['log']) % 2 != 0:
         # print path
         print('odd # of turns')
         return None  # odd number of turns, wrong dialogue
-    d_pp = {'goal': d['goal']}
+    d_pp = {'goal': dialogue['goal']}
     usr_turns = []
     sys_turns = []
     # last_bvs = []
-    for i in range(len(d['log'])):
-        if len(d['log'][i]['text'].split()) > max_len:
-            # print('too long')
+    for i in range(len(dialogue['log'])):
+        if len(dialogue['log'][i]['text'].split()) > max_len:
+            print('too long')
             return None  # too long sentence, wrong dialogue
         if i % 2 == 0:  # usr turn
-            text = d['log'][i]['text']
+            text = dialogue['log'][i]['text']
             if not is_ascii(text):
-                # print('not ascii')
+                print('not ascii')
                 return None
-            usr_turns.append(d['log'][i])
+            usr_turns.append(dialogue['log'][i])
         else:  # sys turn
-            text = d['log'][i]['text']
+            text = dialogue['log'][i]['text']
             if not is_ascii(text):
-                # print('not ascii')
+                print('not ascii')
                 return None
-            belief_summary, belief_value_summary = get_summary_b_state(d['log'][i]['metadata'])
-            d['log'][i]['belief_summary'] = str(belief_summary)
-            d['log'][i]['belief_value_summary'] = belief_value_summary
-            sys_turns.append(d['log'][i])
+            belief_summary, belief_value_summary = get_summary_b_state(dialogue['log'][i]['metadata'])
+            dialogue['log'][i]['belief_summary'] = str(belief_summary)
+            dialogue['log'][i]['belief_value_summary'] = belief_value_summary
+            sys_turns.append(dialogue['log'][i])
     d_pp['usr_log'] = usr_turns
     d_pp['sys_log'] = sys_turns
 
@@ -326,35 +334,16 @@ def get_dial(dialogue):
         dial.append({'usr': item[0], 'sys': item[1], 'sys_a': item[2], 'domain': item[3], 'bvs': item[4]})
     return dial
 
-#
-# def loadData():
-#     # 下载数据
-#     data_url = "data/multi-woz/data.json"
-#     dataset_url = "https://www.repository.cam.ac.uk/bitstream/handle/1810/280608/MULTIWOZ2.zip?sequence=3&isAllowed=y"
-#     if not os.path.exists("data"):
-#         os.makedirs("data")
-#         os.makedirs("data/multi-woz")
-#
-#     if not os.path.exists(data_url):
-#         print("Downloading and unzipping the MultiWOZ dataset")
-#         resp = urllib.request.urlopen(dataset_url)
-#         zip_ref = ZipFile(BytesIO(resp.read()))
-#         zip_ref.extractall("data/multi-woz")
-#         zip_ref.close()
-#         shutil.copy('data/multi-woz/MULTIWOZ2 2/data.json', 'data/multi-woz/')
-#         shutil.copy('data/multi-woz/MULTIWOZ2 2/valListFile.json', 'data/multi-woz/')
-#         shutil.copy('data/multi-woz/MULTIWOZ2 2/testListFile.json', 'data/multi-woz/')
-#         shutil.copy('data/multi-woz/MULTIWOZ2 2/dialogue_acts.json', 'data/multi-woz/')
-
 
 def get_domain(idx, log, domains, last_domain):
     """
-    如果是第一轮对话，择选择active domain中的第一个（可能会有点问题，因为没有证据表明实际对话一定也是按照这样展开的）
-    whatever，这是标准做法
-
-    如果是之后轮次的对话，原则上domain不断延续，除非出现了一句话里有多个domain，择取domain list中最靠前的那个
+    Get the active domain of the current turn
+    Basic assumption: an arbitrary turn contains information about at least one and at most one domain.
     """
     if idx == 1:
+        # As get_domain is invoked in system's turn, the idx of turn is odd number, and the idx of the first
+        # system turn is 1
+        # metadata recoded the accumulated belief state of dialogue (rather than the state of current turn)
         active_domains = get_summary_b_state(log[idx]["metadata"], True)
         crnt_doms = active_domains[0] if len(active_domains) != 0 else domains[0]
         return crnt_doms
@@ -385,11 +374,10 @@ def get_ds_diff(prev_d, crnt_d):
 
 
 def createData():
-    # download the data
-    # loadData()
-
-    # create dictionary of delexicalied values that then we will search against, order matters here!
-    # dic = delexicalize.prepareSlotValuesIndependent()
+    """
+    Ensure the raw multiwoz dataset is already in /resource/multiwoz folder
+    https://www.repository.cam.ac.uk/bitstream/handle/1810/280608/MULTIWOZ2.zip?sequence=3&isAllowed=y
+    """
     delex_data = {}
 
     with open(os.path.join(multiwoz_data_folder, 'data.json'), 'r') as fin1:
@@ -399,16 +387,14 @@ def createData():
         data2 = json.load(fin2)
 
     for d_idx, dialogue_name in enumerate(data):
-
         dialogue = data[dialogue_name]
 
-        # 根据dialogue的goal判定该对话涉及的domain（注意，可能存在多个domain的信息）
-        # goal应当指代最终对话结束时的belief state
+        # Referred domains in the dialogue
         domains = []
-        for dom_k, dom_v in dialogue['goal'].items():
+        for domain_key, domain_value in dialogue['goal'].items():
             # check whether contains some goal entities
-            if dom_v and dom_k not in IGNORE_KEYS_IN_GOAL:
-                domains.append(dom_k)
+            if domain_value and domain_key not in IGNORE_KEYS_IN_GOAL:
+                domains.append(domain_key)
 
         idx_acts = 1
         last_domain, last_slot_fill = "", []
@@ -432,13 +418,6 @@ def createData():
             dialogue = fixDelex(dialogue_name, dialogue, data2, idx, idx_acts)
 
         delex_data[dialogue_name] = dialogue
-
-        # if d_idx > 10:
-        #     break
-
-    # with open('data/multi-woz/woz2like_data.json', 'w') as outfile:
-    #     json.dump(delex_data, outfile)
-
     return delex_data
 
 
@@ -502,6 +481,8 @@ def divideData(data):
             dialogue['dialogue'] = []
 
             for turn_i, turn in enumerate(dial):
+                # 此处有一个左移位的过程，也就是把 user, system 一个turn改为 system user一个turn。
+                # 这么做的原因是我们要理解user的话。因此第一个system turn会置空
                 # usr, usr_o, sys, sys_o, sys_a, domain
                 turn_dialog = dict()
                 turn_dialog['system_transcript'] = dial[turn_i-1]['sys'] if turn_i > 0 else ""

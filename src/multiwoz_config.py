@@ -1,12 +1,11 @@
 import argparse
 import torch
-from datetime import datetime
 import os
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-UNK_token, PAD_token, EOS_token, SOS_token = 0, 1, 2, 3
-UNK, SOS, EOS, PAD = 'UNK', 'SOS', 'EOS', 'PAD'
+DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+MAX_LENGTH = 50
+UNK_token, PAD_token, SEP_token, CLS_token = 0, 1, 2, 3
+UNK, SEP, CLS, PAD = 'UNK', '[SEP]', '[CLS]', '[PAD]'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
 # 指代slot可能出现的三种情况，dontcare代表用户无所谓，none代表未提及，span代表有提及，且以句子中matching的方式完成匹配
 # classify代表有提及，且以分类形式完成匹配
@@ -20,16 +19,17 @@ parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
 # parser.add_argument('-clip', '--clip', help='gradient clip', default=10, required=False)
 parser.add_argument('-sl', '--span_limit', help='classify slot / span slot threshold', default=10, required=False)
-parser.add_argument('-esp', '--evaluation_save_path', help='evaluation save path', type=str, required=False,
-                    default=os.path.abspath('../resource/evaluation/eval_{}.csv'.format(current_time)))
+parser.add_argument('-esp', '--evaluation_save_folder', help='evaluation save folder', type=str, required=False,
+                    default=os.path.abspath('../resource/evaluation/'))
 
 # Setting
-parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.1, required=False)
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.00005, required=False)
 parser.add_argument('-bs', '--batch_size', help='training batch size', default=32, required=False)
+# hotel$train$restaurant$attraction$taxi$hospital$police
 parser.add_argument('-trd', '--train_domain', help='training domain',
-                    default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)
+                    default='hotel$train$restaurant$attraction$taxi', required=False)
 parser.add_argument('-ted', '--test_domain', help='testing domain',
-                    default='hotel$train$restaurant$attraction$taxi$hospital$police', required=False)
+                    default='hotel$train$restaurant$attraction$taxi', required=False)
 parser.add_argument('-mdf', '--multiwoz_dataset_folder', help='multiwoz dataset folder',
                     default=os.path.abspath('../resource/multiwoz/'), required=False)
 parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=False, type=bool)
@@ -65,7 +65,7 @@ parser.add_argument('-enel', '--encoder_num_encoder_layers', help='number of tra
 parser.add_argument('-edff', '--encoder_dim_feed_forward', help='encoder dimension of feed forward layer',
                     default=1024, type=int, required=False)
 parser.add_argument('-ehs', '--encoder_hidden_size', help='encoder hidden size',
-                    default=256, type=int, required=False)
+                    default=128, type=int, required=False)
 args = vars(parser.parse_args())
 
 for key in args:

@@ -59,14 +59,14 @@ def prepare_data(read_from_cache, file_path):
 def tokenize_utterance(data_dict, word_index_stat):
     for dialogues in data_dict['train'], data_dict['dev'], data_dict['test']:
         for dialog in dialogues:
-            dialog_history = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
-                              else UNK_token for word in dialog['dialog_history'].split()]
+            context = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
+                              else UNK_token for word in dialog['context'].split()]
             current_utterance = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
                                  else UNK_token for word in dialog['turn_uttr'].split()]
             dialog['turn_uttr_plain'] = dialog['turn_uttr']
-            dialog['dialog_history_plain'] = dialog['dialog_history']
+            dialog['context_plain'] = dialog['context']
             dialog['turn_uttr'] = current_utterance
-            dialog['dialog_history'] = dialog_history
+            dialog['context'] = context
     return data_dict
 
 
@@ -156,8 +156,9 @@ def collate_fn(data_):
     for index, sample in enumerate(gate):
         for slot_name in sample:
             if not gate_reorganize.__contains__(slot_name):
-                gate_reorganize[slot_name] = np.zeros(len(gate))
-            gate_reorganize[slot_name][index] = sample[slot_name]
+                gate_reorganize[slot_name] = np.zeros(len(gate), dtype=np.long)
+            gate_reorganize[slot_name][index] = int(sample[slot_name])
+            assert int(sample[slot_name]) in (0, 1, 2)
     item_info['gate'] = gate_reorganize
     return item_info
 
@@ -170,8 +171,8 @@ class Dataset(data.Dataset):
         self.ID = data_info['ID']
         self.turn_domain = data_info['turn_domain']
         self.turn_id = data_info['turn_id']
-        self.dialog_history = data_info['dialog_history']
-        self.dialog_history_plain = data_info['dialog_history_plain']
+        self.context = data_info['context']
+        self.context_plain = data_info['context_plain']
         self.turn_uttr_plain = data_info['turn_uttr_plain']
         self.turn_belief = data_info['turn_belief']
         self.gate = data_info['gate']
@@ -179,7 +180,7 @@ class Dataset(data.Dataset):
         self.label = data_info["label"]
         self.slot_value_dict = slot_value_dict
         self.slot_type_dict = slot_type_dict
-        self.num_total_seqs = len(self.dialog_history)
+        self.num_total_seqs = len(self.context)
 
     def __getitem__(self, index):
         """Returns one data pair (source and target)."""
@@ -191,8 +192,8 @@ class Dataset(data.Dataset):
         turn_uttr_plain = self.turn_uttr_plain[index]
         turn_domain = self.preprocess_domain(self.turn_domain[index])
         label = self.label[index]
-        context = self.dialog_history[index]
-        context_plain = self.dialog_history_plain[index]
+        context = self.context[index]
+        context_plain = self.context_plain[index]
 
         item_info = {
             "ID": id_,
@@ -310,16 +311,23 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                         dialogue['label'][slot_name] = slot_value_dict[slot_name].index(turn_belief.split('-')[-1])
                 else:
                     if not (slot_value == 'none' or slot_value == 'dont care'):
-                        try:
-                            start_idx = dialogue['dialog_history'].split(' ').index(slot_value)
-                            end_idx = start_idx + len(slot_value.split(' '))
-                        except ValueError:
+                        value_idx = dialogue['context'].find(' '+slot_value+' ')
+                        if value_idx == -1:
                             start_idx = -1
                             end_idx = -1
+                        else:
+                            start_idx = len(dialogue['context'][:value_idx].strip().split(' '))
+                            end_idx = start_idx + len(slot_value.strip().split(' ')) - 1
+                            # check
+                            # pre_context = dialogue['context'][:value_idx]
+                            tokenized_context = dialogue['context'].split(' ')
+                            for i, item in enumerate(tokenized_context):
+                                if end_idx >= i >= start_idx:
+                                    assert item == slot_value.strip().split(' ')[i - start_idx]
                         dialogue['label'][slot_name] = [start_idx, end_idx]
                         if start_idx == -1:
-                            # print(dialogue['dialog_history'])
-                            # print(slot_value)
+                            print(dialogue['context'])
+                            print('slot name: {}, slot value: {}'.format(slot_name, slot_value))
                             fail_match += 1
     print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
     return dataset, slot_value_dict, slot_type_dict
@@ -375,27 +383,28 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
                 domain_counter[domain] += 1
 
             # Reading data
-            for ti, turn in enumerate(dial_dict["dialogue"]):
+            for ti in range(len(dial_dict["dialogue"])):
+                turn = dial_dict['dialogue'][ti]
                 turn_domain = turn["domain"]
                 turn_id = turn["turn_idx"]
                 if ti == 0:
-                    turn_uttr = utt_format(turn["transcript"] + " [SEP] ")
-                    turn_uttr_strip = turn_uttr.strip()
-                    dialog_history += utt_format(turn["transcript"] + " [SEP] ")
+                    turn_uttr = utt_format(turn["transcript"] + " [SEP]")
                 else:
-                    turn_uttr = utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP] ")
-                    turn_uttr_strip = turn_uttr.strip()
-                    dialog_history += utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP] ")
+                    turn_uttr = utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP]")
+                turn_uttr_strip = turn_uttr.strip()
+
                 turn_belief_dict = bs_format(fix_general_label_error(turn["belief_state"], False, all_slots))
                 turn_belief_list = [str(k) + '-' + str(v) for k, v in turn_belief_dict.items()]
-                source_text = dialog_history.strip()
+                source_text = turn_uttr + ' ' + dialog_history.strip() + ' '
+
+                dialog_history += utt_format(turn_uttr)
 
                 data_detail = {
                     "ID": dial_dict["dialogue_idx"],
                     "domains": dial_dict["domains"],
                     "turn_domain": turn_domain,
                     "turn_id": turn_id,
-                    "dialog_history": '[CLS] ' + source_text,
+                    "context": '[CLS] ' + source_text,
                     "turn_belief": turn_belief_list,
                     "turn_uttr": '[CLS] ' + turn_uttr_strip,
                 }
@@ -513,7 +522,7 @@ def load_glove_embeddings(word_index_dict):
     glove_embedding = np.array(glove_embedding)
 
     embedding_dimension = len(glove_embedding[0])
-    pad_embedding = np.zeros(embedding_dimension)
+    pad_embedding = (np.random.random(embedding_dimension) - 0.5) * 2
     unk_embedding = np.average(glove_embedding, axis=0)
     # I did not find tutorial on how to initialize embedding of sos and eos
     # So I just use zero-mean random vectors
@@ -1034,6 +1043,14 @@ def bs_format(bs):
 
 
 def utt_format(utt):
+    # drop the first 0 in time
+    mat = re.findall(r"(\d{1,2}:\d{1,2})", utt)
+    if len(mat) > 0:
+        for item in mat:
+            if item[0] == '0':
+                v = item[1:]
+                utt = utt.replace(item, v)
+
     utt = utt.replace("theater", "theatre")
     utt = utt.replace("barbeque", "barbecue")
     utt = utt.replace("center", "centre")

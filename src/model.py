@@ -2,12 +2,12 @@ import os
 import math
 import torch
 from tqdm import tqdm
-from torch import nn
+from torch import nn, Tensor
 from torch.nn.functional import softmax
 from evaluation import evaluation_batch, comprehensive_evaluation
 from torch.nn import TransformerEncoderLayer, TransformerEncoder, LayerNorm
 from multiwoz_util import prepare_data, load_graph_embeddings, graph_embeddings_alignment
-from multiwoz_config import args, DEVICE
+from multiwoz_config import args, DEVICE, PAD_token
 import pickle
 from torch import optim
 
@@ -89,8 +89,9 @@ class KGENLU(nn.Module):
         """
         label = data['label']
         context = data['context'].transpose(1, 0).to(DEVICE)
-        context_embedding = self.embedding(context)
-        encode = self.encoder(context_embedding)
+        input_mask, input_padding_mask = self.create_mask(context)
+        context_embedding = self.embedding(context) * math.sqrt(self.embedding_dim)
+        encode = self.encoder(context_embedding, mask=input_mask, padding_mask=input_padding_mask)
 
         predict_gate = {}
         predict_dict = {}
@@ -105,28 +106,29 @@ class KGENLU(nn.Module):
                 predict_dict[slot_name] = weight(encode)
         return predict_gate, predict_dict
 
+    @staticmethod
+    def create_mask(inputs):
+        sequence_length = inputs.shape[0]
+        input_mask = torch.zeros((sequence_length, sequence_length), device=DEVICE).type(torch.bool)
+        input_padding_mask = torch.transpose(inputs==PAD_token, 0, 1)
+        return input_mask, input_padding_mask
+
 
 class PositionalEncoding(nn.Module):
+    def __init__(self, emb_size: int, dropout: float, mex_length: int = 1000):
+        super(PositionalEncoding, self).__init__()
+        den = torch.exp(- torch.arange(0, emb_size, 2)* math.log(10000) / emb_size)
+        pos = torch.arange(0, mex_length).reshape(mex_length, 1)
+        pos_embedding = torch.zeros((mex_length, emb_size))
+        pos_embedding[:, 0::2] = torch.sin(pos * den)
+        pos_embedding[:, 1::2] = torch.cos(pos * den)
+        pos_embedding = pos_embedding.unsqueeze(-2)
 
-    def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 1000):
-        # 分别给d_model的每个维度添加略微存在差异的positional信息（每个维度的三角函数周期，sin/cos存在略微的差别）
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        position = torch.arange(max_len).unsqueeze(1)
-        # for numerical stable
-        div_term = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model))
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        self.dropout = nn.Dropout(dropout)
+        self.register_buffer('pos_embedding', pos_embedding)
 
-    def forward(self, x):
-        """
-        Args:
-            x: Tensor, shape [seq_len, batch_size, embedding_dim]
-        """
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
+    def forward(self, token_embedding: Tensor):
+        return self.dropout(token_embedding + self.pos_embedding[:token_embedding.size(0), :])
 
 
 class Encoder(nn.Module):
@@ -147,9 +149,10 @@ class Encoder(nn.Module):
             LayerNorm(d_model)
         ).to(DEVICE)
 
-    def forward(self, context):
-        encode = self.encoder(context) * math.sqrt(self.d_model)
-        encode = self.pos_encoder(encode)
+    def forward(self, context, mask, padding_mask):
+        encode = self.pos_encoder(context)
+        encode = self.encoder(encode, mask=mask, src_key_padding_mask=padding_mask)
+
         return encode
 
 
@@ -173,7 +176,9 @@ def train_process(dataset, model, optimizer, cross_entropy, epoch):
                 value_loss = 0.5 * (cross_entropy(value_slot_predict[:, :, 0].transpose(1, 0), value_slot_label[:, 0]) +
                                     cross_entropy(value_slot_predict[:, :, 1].transpose(1, 0), value_slot_label[:, 1]))
             batch_loss += value_loss + gate_loss
+
         batch_loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'], error_if_nonfinite=False)
 
         optimizer.step()
         full_loss += batch_loss

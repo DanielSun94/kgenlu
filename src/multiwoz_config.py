@@ -3,6 +3,7 @@ import torch
 import os
 
 DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+# DEVICE = 'cpu'
 MAX_LENGTH = 50
 UNK_token, PAD_token, SEP_token, CLS_token = 0, 1, 2, 3
 UNK, SEP, CLS, PAD = 'UNK', '[SEP]', '[CLS]', '[PAD]'
@@ -21,9 +22,16 @@ parser = argparse.ArgumentParser(description='Multi-Domain DST')
 parser.add_argument('-sl', '--span_limit', help='classify slot / span slot threshold', default=10, required=False)
 parser.add_argument('-esp', '--evaluation_save_folder', help='evaluation save folder', type=str, required=False,
                     default=os.path.abspath('../resource/evaluation/'))
+parser.add_argument('-trdf', '--train_data_fraction', help='train data fraction', type=float, required=False,
+                    default=1)
+parser.add_argument('-tedf', '--test_data_fraction', help='test_data_fraction', type=float, required=False,
+                    default=1)
+parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
 
 # Setting
-parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.00005, required=False)
+parser.add_argument('-is', '--imbalance_sampler', help='imbalance_sampler', type=bool, required=False,
+                    default=1)
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.0001, required=False)
 parser.add_argument('-bs', '--batch_size', help='training batch size', default=32, required=False)
 # hotel$train$restaurant$attraction$taxi$hospital$police
 parser.add_argument('-trd', '--train_domain', help='training domain',
@@ -32,9 +40,7 @@ parser.add_argument('-ted', '--test_domain', help='testing domain',
                     default='hotel$train$restaurant$attraction$taxi', required=False)
 parser.add_argument('-mdf', '--multiwoz_dataset_folder', help='multiwoz dataset folder',
                     default=os.path.abspath('../resource/multiwoz/'), required=False)
-parser.add_argument('-imbsamp', '--imbalance_sampler', help='', required=False, default=False, type=bool)
 parser.add_argument('-es', '--early_stop', help='early stop', default=True, required=False)
-parser.add_argument('-evalp', '--eval_epoch', help='eval epoch index', default=100, type=int, required=False)
 parser.add_argument('-cp', '--cache_path', help='corpus cache path', type=str, required=False,
                     default=os.path.abspath('../resource/multiwoz/cache.pkl'))
 

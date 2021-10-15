@@ -126,10 +126,10 @@ def comprehensive_evaluation(evaluation_batch_list, slot_info_dict, data_type, e
         if result_dict[name].__contains__('exist_true'):
             accuracy = str(round((np.sum(result_dict[name]['exist_true']) + np.sum(result_dict[name]['not_exist_true']))
                                  / len(result_dict[name]['exist_true'])*100, 2))+"%"
-            exist_recall = str(round((np.sum(result_dict[name]['exist_true'])) / len(result_dict[name]['exist_true']) * 100, 2)) + "%"
-            not_exist_recall = str(round((np.sum(result_dict[name]['not_exist_true'])) / len(result_dict[name]['exist_true']) * 100, 2)) + "%"
+            exist_recall = str(round((np.sum(result_dict[name]['exist_true'])) / (np.sum(result_dict[name]['exist_true'])+np.sum(result_dict[name]['exist_false'])) * 100, 2)) + "%"
+            not_exist_recall = str(round((np.sum(result_dict[name]['not_exist_true'])) / (np.sum(result_dict[name]['not_exist_false'])+np.sum(result_dict[name]['not_exist_true'])) * 100, 2)) + "%"
         else:
-            accuracy = str(round(np.sum(result_dict[name])/len(result_dict[name])))+"%"
+            accuracy = str(round(np.sum(result_dict[name])/len(result_dict[name])*100, 2))+"%"
             exist_recall = 0
             not_exist_recall = 0
         data_to_write_.append([name, name_type, accuracy, exist_recall, not_exist_recall, exist_true, exist_false, not_exist_true, not_exist_false])
@@ -138,12 +138,12 @@ def comprehensive_evaluation(evaluation_batch_list, slot_info_dict, data_type, e
     for line in data_to_write_:
         data_to_write.append(line)
     print('epoch: {}'.format(epoch))
-    print(['name', 'type', 'accuracy', 'exist_true', 'exist_false', 'not_exist_true', 'not_exist_false'])
+    print(['name', 'type', 'accuracy', 'exist_recall', 'not_exist_recall', 'exist_true', 'exist_false', 'not_exist_true', 'not_exist_false'])
     for line in data_to_write_:
         print(line)
 
     current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
-    file_path = os.path.join(args['evaluation_save_folder'], 'eval_{}_{}_{}'.format(epoch, data_type, current_time))
+    file_path = os.path.join(args['evaluation_save_folder'], 'eval_{}_{}_{}.csv'.format(epoch, data_type, current_time))
     with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
         csv.writer(f).writerows(data_to_write)
     return result_dict

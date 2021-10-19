@@ -2,11 +2,19 @@ import argparse
 import torch
 import os
 
-DEVICE = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+max_sequence_length= 512
+pretrained_model = 'roberta' # 'roberta' None
+data_portion = 100
+d_model = 768
+cuda = 'cuda:1'
+base_learning_rate = 3 * 1e-5
+batch_size = 8
+
+DEVICE = torch.device(cuda if torch.cuda.is_available() else "cpu")
 # DEVICE = 'cpu'
 MAX_LENGTH = 50
 UNK_token, PAD_token, SEP_token, CLS_token = 0, 1, 2, 3
-UNK, SEP, CLS, PAD = 'UNK', '[SEP]', '[CLS]', '[PAD]'
+UNK, SEP, CLS, PAD = '<unk>', '</s>', '<cls>', '<pad>'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
 # 指代slot可能出现的三种情况，dontcare代表用户无所谓，none代表未提及，span代表有提及，且以句子中matching的方式完成匹配
 # classify代表有提及，且以分类形式完成匹配
@@ -18,6 +26,10 @@ multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
 multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
 parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
+parser.add_argument('-msl', '--max_sentence_length', help='max_sentence_length', type=int, required=False,
+                    default=max_sequence_length)
+parser.add_argument('-tfd', '--training_data_fraction', help='training_data_fraction', type=int, required=False,
+                    default=data_portion)
 # parser.add_argument('-clip', '--clip', help='gradient clip', default=10, required=False)
 parser.add_argument('-sl', '--span_limit', help='classify slot / span slot threshold', default=10, required=False)
 parser.add_argument('-esp', '--evaluation_save_folder', help='evaluation save folder', type=str, required=False,
@@ -27,12 +39,13 @@ parser.add_argument('-trdf', '--train_data_fraction', help='train data fraction'
 parser.add_argument('-tedf', '--test_data_fraction', help='test_data_fraction', type=float, required=False,
                     default=1)
 parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
+parser.add_argument("--pretrained_model", default=pretrained_model, type=str, help="pretrained_model")
 
 # Setting
 parser.add_argument('-is', '--imbalance_sampler', help='imbalance_sampler', type=bool, required=False,
                     default=1)
-parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=0.0001, required=False)
-parser.add_argument('-bs', '--batch_size', help='training batch size', default=32, required=False)
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=base_learning_rate, required=False)
+parser.add_argument('-bs', '--batch_size', help='training batch size', default=batch_size, required=False)
 # hotel$train$restaurant$attraction$taxi$hospital$police
 parser.add_argument('-trd', '--train_domain', help='training domain',
                     default='hotel$train$restaurant$attraction$taxi', required=False)
@@ -60,7 +73,7 @@ parser.add_argument('-wnp', '--wordnet_path', help='wordnet file path', type=str
 
 # Encoder (Transformer) Setting
 parser.add_argument('-ed', '--encoder_dropout', help='encoder hidden size', default=0.1, type=float, required=False)
-parser.add_argument('-edm', '--encoder_d_model', default=300, type=int, required=False,
+parser.add_argument('-edm', '--encoder_d_model', default=d_model, type=int, required=False,
                     help='the number of expected features in the input (token embedding dimension)')
 parser.add_argument('-enh', '--encoder_n_head', help='number of multi-head attention', default=6, type=int,
                     required=False)

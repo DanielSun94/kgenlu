@@ -2,6 +2,7 @@
 # https://github.com/alexa/dstqa/blob/master/multiwoz_2.1_format.py
 # and https://raw.githubusercontent.com/jasonwu0731/trade-dst/master/utils/fix_label.py
 # including fix_general_label_error, utt_format, bs_format
+import random
 import numpy as np
 import os
 import pickle
@@ -11,9 +12,11 @@ from multiwoz_config import args, UNK, PAD, CLS, SEP, EXPERIMENT_DOMAINS, UNK_to
 import json
 import re
 import torch.utils.data as data
-
+from transformers import RobertaTokenizer
+tokenizer = RobertaTokenizer.from_pretrained('roberta-base', add_prefix_space=True)
 # preset token tag
 preset_word_num = 4
+max_seq_len = args['max_sentence_length']
 
 
 def prepare_data(read_from_cache, file_path):
@@ -23,46 +26,58 @@ def prepare_data(read_from_cache, file_path):
     else:
         batch_size = args['batch_size']
         data_path = args['multiwoz_dataset_folder']
+        training_fraction = args['training_data_fraction']
         train_file_path = os.path.join(data_path, 'train_dials.json')
         dev_file_path = os.path.join(data_path, 'dev_dials.json')
         test_file_path = os.path.join(data_path, 'test_dials.json')
         ontology_file_path = os.path.join(data_path, 'ontology.json')
-        all_slots = get_slot_information(ontology_file_path)
+        word_index_stat = None
 
+        all_slots = get_slot_information(ontology_file_path)
         valid_idx_set = dialogue_filter(train_file_path, dev_file_path, test_file_path, args['train_domain'],
                                         args['test_domain'])
-
-        word_index_stat = create_word_index_mapping(all_slots, train_file_path, dev_file_path, test_file_path,
-                                                    valid_idx_set)
         data_dict, max_utterance_len = load_corpus(all_slots, train_file_path, dev_file_path, test_file_path,
                                                    valid_idx_set)
         data_dict, slot_value_dict, slot_type_dict = \
-            state_reorganize(data_dict, args['train_domain'], args['test_domain'])
-        data_dict = tokenize_utterance(data_dict, word_index_stat)
-        train = get_sequence(data_dict['train'], batch_size, slot_value_dict, slot_type_dict, True)
+            state_tokenize(data_dict, args['train_domain'], args['test_domain'])
+        if args['pretrained_model'] is None:
+            word_index_stat = create_word_index_mapping(all_slots, train_file_path, dev_file_path, test_file_path,
+                                                        valid_idx_set)
+            data_dict = tokenize_utterance(data_dict, word_index_stat)
+        else:
+            data_dict = tokenize_utterance(data_dict)
+
+        train = get_sequence(data_dict['train'], batch_size, slot_value_dict, slot_type_dict, True, training_fraction)
         dev = get_sequence(data_dict['dev'], batch_size, slot_value_dict, slot_type_dict, True)
         test = get_sequence(data_dict['test'], batch_size, slot_value_dict, slot_type_dict, True)
         pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, max_utterance_len],
                     open(file_path, 'wb'))
-    load_glove_embeddings(word_index_stat.word2index)
+    # load_glove_embeddings(word_index_stat.word2index)
     print('data prepared')
 
     print("Read %s pairs train" % len(data_dict['train']))
     print("Read %s pairs dev" % len(data_dict['dev']))
     print("Read %s pairs test" % len(data_dict['test']))
-    print("Vocab_size: %s " % word_index_stat.n_words)
+    # print("Vocab_size: %s " % word_index_stat.n_words)
     print("Max. length of dialog words: %s " % max_utterance_len)
     print("Device = {}".format(DEVICE))
     return train, dev, test, word_index_stat, slot_value_dict, slot_type_dict
 
 
-def tokenize_utterance(data_dict, word_index_stat):
+def tokenize_utterance(data_dict, word_index_stat=None):
+
     for dialogues in data_dict['train'], data_dict['dev'], data_dict['test']:
         for dialog in dialogues:
-            context = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
-                              else UNK_token for word in dialog['context'].split()]
-            current_utterance = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
-                                 else UNK_token for word in dialog['turn_uttr'].split()]
+            if args['pretrained_model'] is None:
+                context = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
+                                  else UNK_token for word in dialog['context'].split(' ')]
+                current_utterance = [word_index_stat.word2index[word] if word_index_stat.word2index.__contains__(word)
+                                     else UNK_token for word in dialog['turn_uttr'].split(' ')]
+            elif args['pretrained_model'] == 'roberta':
+                context = tokenizer(dialog['context'])['input_ids']
+                current_utterance = tokenizer(dialog['turn_uttr'])['input_ids']
+            else:
+                raise ValueError('invalid pretrained model name')
             dialog['turn_uttr_plain'] = dialog['turn_uttr']
             dialog['context_plain'] = dialog['context']
             dialog['turn_uttr'] = current_utterance
@@ -70,17 +85,26 @@ def tokenize_utterance(data_dict, word_index_stat):
     return data_dict
 
 
-def get_sequence(pairs, batch_size, slot_value_dict, slot_type_dict, sample_type):
-    data_info = {}
+def get_sequence(pairs, batch_size, slot_value_dict, slot_type_dict, sample_type, data_fraction=100):
+    data_info, data_info_shuffled = {}, {}
     data_keys = pairs[0].keys()
+    shuffle_idx_list = [i for i in range(len(pairs)*data_fraction//100)]
+    random.shuffle(shuffle_idx_list)
+
     for k in data_keys:
         data_info[k] = []
+        data_info_shuffled[k] = []
 
     for pair in pairs:
         for k in data_keys:
             data_info[k].append(pair[k])
 
-    dataset = Dataset(data_info, slot_value_dict, slot_type_dict)
+    for k in data_keys:
+        for idx in shuffle_idx_list:
+            data_info_shuffled[k].append(data_info[k][idx])
+
+
+    dataset = Dataset(data_info_shuffled, slot_value_dict, slot_type_dict)
 
     if args["imbalance_sampler"] and sample_type:
         data_loader = torch.utils.data.DataLoader(dataset=dataset,
@@ -101,15 +125,22 @@ def collate_fn(data_):
         """
         merge from batch * sent_len to batch * max_len
         PAD_Token的index就是1
+
+        if context length is larger than max_len, truncate the context
         """
         lengths = [len(seq) for seq in sequences]
         max_len = 1 if max(lengths) == 0 else max(lengths)
+        if max_len > max_seq_len:
+            max_len = max_seq_len
         assert PAD_token == 1
         padded_seqs = torch.ones(len(sequences), max_len).long()
         for i, seq in enumerate(sequences):
             seq = torch.Tensor(seq)
             end = lengths[i]
-            padded_seqs[i, :end] = seq[:end]
+            if end < max_len:
+                padded_seqs[i, :end] = seq[:end]
+            else:
+                padded_seqs[i] = seq[:max_len]
         padded_seqs = padded_seqs.detach()  # torch.tensor(padded_seqs)
         return padded_seqs, lengths
 
@@ -138,6 +169,7 @@ def collate_fn(data_):
                 else:
                     label =-1
             elif slot_type_dict[slot_name] == 'span':
+                # sample[slot_name][1]: end index
                 if sample[slot_name] is not None:
                     label = sample[slot_name]
                 else:
@@ -230,7 +262,7 @@ class Dataset(data.Dataset):
         return domains[turn_domain]
 
 
-def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
+def state_tokenize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
     """
     We apply dual strategy to address DST challenge in this study. That is, if the number of possible values of a slot
     is small than the parameter span_limit (default 10), we will treat the DST problem on the slot as a classification
@@ -289,7 +321,6 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
             for slot_name in slot_type_dict:
                 dialogue['gate'][slot_name], dialogue['label'][slot_name] = 0, None
             for turn_belief in turn_beliefs:
-                count += 1
                 slot_domain = turn_belief.split('-')[0]
                 slot_name = turn_belief.split('-')[0] + '-' + turn_belief.split('-')[1]
                 slot_value = turn_belief.split('-')[2]
@@ -311,25 +342,51 @@ def state_reorganize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                         dialogue['label'][slot_name] = slot_value_dict[slot_name].index(turn_belief.split('-')[-1])
                 else:
                     if not (slot_value == 'none' or slot_value == 'dont care'):
-                        value_idx = dialogue['context'].find(' '+slot_value+' ')
-                        if value_idx == -1:
+                        count += 1
+                        if args['pretrained_model'] is None:
+                            value_idx = dialogue['context'].find(' ' + slot_value + ' ')
+                            if value_idx == -1:
+                                start_idx = -1
+                                end_idx = -1
+                            else:
+                                start_idx = len(dialogue['context'][:value_idx].strip().split(' '))
+                                end_idx = start_idx + len(slot_value.strip().split(' ')) - 1
+                                # check
+                                # pre_context = dialogue['context'][:value_idx]
+                                tokenized_context = dialogue['context'].split(' ')
+                                for i, item in enumerate(tokenized_context):
+                                    if end_idx >= i >= start_idx:
+                                        assert item == slot_value.strip().split(' ')[i - start_idx]
+                            dialogue['label'][slot_name] = [start_idx, end_idx]
+                        elif args['pretrained_model'] == 'roberta':
+                            # Roberta uses BPE tokenizer
+                            token_list = tokenizer(slot_value)['input_ids'][1: -1]
+                            if len(token_list) == 0:
+                                print(slot_value)
+                            context_tokenize = tokenizer(dialogue['context'])['input_ids']
                             start_idx = -1
-                            end_idx = -1
+                            for i in range(len(context_tokenize)):
+                                if  len(token_list) != 0 and context_tokenize[i] == token_list[0] and \
+                                        (i+len(token_list)) < len(context_tokenize) \
+                                    and context_tokenize[i:i + len(token_list)] == token_list:
+                                    start_idx = i
+                                    break
+                            if start_idx == -1:
+                                end_idx = -1
+                            else:
+                                end_idx = start_idx + len(token_list) -1
+                            dialogue['label'][slot_name] = [start_idx, end_idx]
+
+                            # if start_idx == -1:
+                            #     print(dialogue['context'])
+                            #     print('slot name: {}, slot value: {}'.format(slot_name, slot_value))
+                            #     print(context_tokenize)
+                            #     print(token_list)
                         else:
-                            start_idx = len(dialogue['context'][:value_idx].strip().split(' '))
-                            end_idx = start_idx + len(slot_value.strip().split(' ')) - 1
-                            # check
-                            # pre_context = dialogue['context'][:value_idx]
-                            tokenized_context = dialogue['context'].split(' ')
-                            for i, item in enumerate(tokenized_context):
-                                if end_idx >= i >= start_idx:
-                                    assert item == slot_value.strip().split(' ')[i - start_idx]
-                        dialogue['label'][slot_name] = [start_idx, end_idx]
+                            raise ValueError('invalid pretrained model')
                         if start_idx == -1:
-                            print(dialogue['context'])
-                            print('slot name: {}, slot value: {}'.format(slot_name, slot_value))
                             fail_match += 1
-    print('fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
+    print('span fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
     return dataset, slot_value_dict, slot_type_dict
 
 
@@ -373,7 +430,7 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
     for key in data_type_dict:
         dials = json.load(open(data_type_dict[key], 'r'))
         for dial_dict in dials:
-            dialog_history = ""
+            dialog_history = []
             if dial_dict['dialogue_idx'] not in valid_idx_set:
                 continue
 
@@ -388,25 +445,27 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
                 turn_domain = turn["domain"]
                 turn_id = turn["turn_idx"]
                 if ti == 0:
-                    turn_uttr = utt_format(turn["transcript"] + " [SEP]")
+                    turn_uttr = utt_format(turn["transcript"] + " " + SEP)
                 else:
-                    turn_uttr = utt_format(turn["system_transcript"] + " [SEP] " + turn["transcript"] + " [SEP]")
+                    turn_uttr = utt_format(turn["system_transcript"] + " " + SEP + ' ' + turn["transcript"] + " " + SEP)
                 turn_uttr_strip = turn_uttr.strip()
 
                 turn_belief_dict = bs_format(fix_general_label_error(turn["belief_state"], False, all_slots))
                 turn_belief_list = [str(k) + '-' + str(v) for k, v in turn_belief_dict.items()]
-                source_text = turn_uttr + ' ' + dialog_history.strip() + ' '
+                source_text = turn_uttr + ' '
+                for i in range(len(dialog_history)):
+                    source_text += dialog_history[len(dialog_history)-1-i].strip() + ' '
 
-                dialog_history += utt_format(turn_uttr)
+                dialog_history.append(utt_format(turn_uttr))
 
                 data_detail = {
                     "ID": dial_dict["dialogue_idx"],
                     "domains": dial_dict["domains"],
                     "turn_domain": turn_domain,
                     "turn_id": turn_id,
-                    "context": '[CLS] ' + source_text,
+                    "context": CLS+' ' + source_text,
                     "turn_belief": turn_belief_list,
-                    "turn_uttr": '[CLS] ' + turn_uttr_strip,
+                    "turn_uttr": CLS+' ' + turn_uttr_strip,
                 }
                 data_dict[key].append(data_detail)
 
@@ -597,16 +656,6 @@ def load_graph_embeddings(embed_path, word_net_path):
     for idx in idx_entity_dict:
         entity_embed_dict[idx_entity_dict[idx]] = entity_embed[idx]
     return entity_embed_dict, relation_embed_dict
-
-
-def tokenize(string_list, word_index_dict):
-    token_list = []
-    for word in string_list:
-        if word_index_dict.__contains__(word):
-            token_list.append(word_index_dict[word])
-        else:
-            token_list.append(UNK)
-    return np.array(token_list)
 
 
 def fix_general_label_error(labels, type_, slots):

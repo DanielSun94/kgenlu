@@ -7,13 +7,21 @@ from torch.nn.functional import softmax
 from evaluation import evaluation_batch, comprehensive_evaluation
 from transformers import RobertaModel, AlbertModel
 from torch.nn import TransformerEncoderLayer, TransformerEncoder, LayerNorm
+from transformers import get_linear_schedule_with_warmup
 from multiwoz_util import prepare_data
-from multiwoz_config import args, DEVICE, PAD_token
+from multiwoz_config import args, DEVICE, PAD_token, logger
 import pickle
 from torch import optim
-import logging
+from datetime import datetime
 
 max_seq_len = args['max_sentence_length']
+multi_GPU_flag = args['multi_gpu']
+if multi_GPU_flag:
+    logger.info("Using Multiple GPU (if possible) to optimize model")
+    logger.info('number of available GPU: {}'.format(torch.cuda.device_count()))
+    torch.distributed.init_process_group(backend="nccl")
+    torch.cuda.set_device(args['local_rank'])
+
 
 class KGENLU(nn.Module):
     def __init__(self, word_index_stat, slot_info_dict, name, pretrained_model):
@@ -142,16 +150,16 @@ class CustomEncoder(nn.Module):
                 os.path.join(args['aligned_embedding_path'], 'glove_42B_embed_{}'.format(self.vocab_size)), 'rb'))
             new = self.embedding.weight.data.new
             self.embedding.weight.data.copy_(new(e))
-            print('Pretrained Embedding Loaded')
+            logger.info('Pretrained Embedding Loaded')
         else:
             nn.init.xavier_normal_(self.embedding.weight)
-            print('Training Embedding from scratch')
+            logger.info('Training Embedding from scratch')
         if args["update_embedding"]:
             self.embedding.weight.requires_grad = True
-            print('Update Embedding in training phase')
+            logger.info('Update Embedding in training phase')
         else:
             self.embedding.weight.requires_grad = False
-            print('Do not update Embedding in training phase')
+            logger.info('Do not update Embedding in training phase')
 
     def forward(self, context, padding_mask):
         padding_mask = padding_mask.transpose(0, 1)
@@ -161,7 +169,7 @@ class CustomEncoder(nn.Module):
         return encode
 
 
-def train_process(dataset, model, optimizer, cross_entropy, epoch):
+def train_process(dataset, model, optimizer, cross_entropy, epoch, scheduler):
     dataset = tqdm(enumerate(dataset), total=len(dataset))
     full_loss = 0
     for i, batch in dataset:
@@ -174,22 +182,25 @@ def train_process(dataset, model, optimizer, cross_entropy, epoch):
             value_slot_predict = predict_dict_logits[slot_name]
             value_slot_label = torch.tensor(batch['label'][slot_name], dtype=torch.long).to(DEVICE)
 
-            gate_loss = cross_entropy(gate_slot_predict, gate_slot_label)
+            gate_loss = cross_entropy(gate_slot_predict, gate_slot_label) * (1-args['span_loss_ratio'])
             if batch['slot_type_dict'][0][slot_name] == 'classify':
-                value_loss = cross_entropy(value_slot_predict, value_slot_label)
+                value_loss = cross_entropy(value_slot_predict, value_slot_label) * (1-args['span_loss_ratio'])
             else:
                 # for long truncate case, the interested token is beyond the maximum sentence length
                 value_slot_label = torch.where(value_slot_label < max_seq_len, value_slot_label, -1)
-                value_loss = 0.5 * (cross_entropy(value_slot_predict[:, :, 0].transpose(1, 0), value_slot_label[:, 0]) +
-                                cross_entropy(value_slot_predict[:, :, 1].transpose(1, 0), value_slot_label[:, 1]))
-
-            batch_loss += value_loss + gate_loss
+                value_loss = args['span_loss_ratio'] * \
+                    (cross_entropy(value_slot_predict[:, :, 0].transpose(1, 0), value_slot_label[:, 0]) +
+                     cross_entropy(value_slot_predict[:, :, 1].transpose(1, 0), value_slot_label[:, 1]))
+            if args['multi_gpu']:
+                batch_loss += value_loss.mean() + gate_loss.mean()
+            else:
+                batch_loss += value_loss + gate_loss
         batch_loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'], error_if_nonfinite=False)
-
+        torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
         optimizer.step()
+        scheduler.step()
         full_loss += batch_loss
-    print('epoch: {}, average_loss: {}'.format(epoch, full_loss/dataset.total))
+    logger.info('epoch: {}, average_loss: {}'.format(epoch, full_loss/dataset.total))
 
 
 def validation_and_test_process(dataset, model, slot_info_dict):
@@ -243,27 +254,51 @@ class PretrainedEncoder(nn.Module):
 def main():
     file_path = args['cache_path']
     train, val, test, word_index_stat, slot_value_dict, slot_type_dict =\
-        prepare_data(read_from_cache=False, file_path=file_path)
+        prepare_data(read_from_cache=True, file_path=file_path)
+
+
     slot_info_dict = {'slot_value_dict': slot_value_dict, 'slot_type_dict': slot_type_dict}
     model = KGENLU(word_index_stat=word_index_stat, slot_info_dict=slot_info_dict,
                    pretrained_model=args['pretrained_model'], name='kgenlu')
-    cross_entropy = nn.CrossEntropyLoss(ignore_index=-1)
-    learning_rate = args['learning_rate']
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.97)
 
-    for epoch in range(200):
-        print("Epoch :{}".format(epoch))
+    if args.local_rank != -1:
+        model = torch.nn.parallel.DistributedDataParallel(
+            model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
+
+    if args['model_checkpoint_name'] != "":
+        model.load_state_dict(torch.load(os.path.join(args['model_checkpoint_folder'],
+                                                      args['model_checkpoint_name'] + '.cpkt')))
+
+    cross_entropy = nn.CrossEntropyLoss(ignore_index=-1)
+    lr = args['learning_rate']
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+
+    t_total = len(train) * args['train_epoch']
+    num_warmup_steps = round(args['train_epoch'] * args['warm_up_ratio']) * len(train)
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
+                                                num_training_steps=t_total)
+
+    for epoch in range(args['train_epoch']):
+        logger.info("Epoch :{}".format(epoch))
+        logger.info('current learning rate: {}'.format((optimizer.param_groups[0]["lr"])))
         # Run the train function
         model.train()
-        train_process(train, model, optimizer, cross_entropy, epoch)
+        train_process(train, model, optimizer, cross_entropy, epoch, scheduler)
         model.eval()
 
+        # validation and test
         validation_result = validation_and_test_process(val, model, slot_info_dict)
-        comprehensive_evaluation(validation_result, slot_info_dict, 'validation', epoch)
+        _, vja = comprehensive_evaluation(validation_result, slot_info_dict, 'validation', epoch)
         test_result = validation_and_test_process(test, model, slot_info_dict)
-        comprehensive_evaluation(test_result, slot_info_dict, 'test', epoch)
-        scheduler.step()
+        _, tja = comprehensive_evaluation(test_result, slot_info_dict, 'test', epoch)
+
+        # save model
+        current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        model_name = 'custom' if args['pretrained_model'] is None else args['pretrained_model']
+        file_name = '{}_{}_{}_vja_{}_tja_{}.cpkt'.format(epoch, model_name, current_time, vja, tja)
+        checkpoint = os.path.join(args['model_checkpoint_folder'], file_name)
+        parameter_dict = model.state_dict()
+        torch.save(parameter_dict, checkpoint)
 
 
 if __name__ == '__main__':

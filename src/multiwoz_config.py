@@ -1,14 +1,19 @@
 import argparse
 import torch
 import os
+import logging
 
-max_sequence_length= 512
-pretrained_model = 'roberta' # 'roberta' None
+epoch = 40
+max_sequence_length = 1000
+multi_gpu = True
+pretrained_model = None # 'roberta' None
 data_portion = 100
-d_model = 768
+d_model = 300
 cuda = 'cuda:1'
-base_learning_rate = 3 * 1e-5
-batch_size = 8
+base_learning_rate = 1 * 1e-4
+batch_size = 32
+model_checkpoint = ""
+local_rank = -1
 
 DEVICE = torch.device(cuda if torch.cuda.is_available() else "cpu")
 # DEVICE = 'cpu'
@@ -26,6 +31,11 @@ multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
 multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
 parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
+parser.add_argument('-lor', '--local_rank', help='local_rank', type=int, required=False, default=local_rank)
+parser.add_argument('-mg', '--multi_gpu', help='use multiple GPUs', type=bool, required=False, default=multi_gpu)
+parser.add_argument('-te', '--train_epoch', help='train_epoch', type=int, required=False, default=epoch)
+parser.add_argument('-slr', '--span_loss_ratio', help='span_loss_ratio', type=float, required=False, default=0.8)
+parser.add_argument('-wur', '--warm_up_ratio', help='warm_up_ratio', type=float, required=False, default=0.1)
 parser.add_argument('-msl', '--max_sentence_length', help='max_sentence_length', type=int, required=False,
                     default=max_sequence_length)
 parser.add_argument('-tfd', '--training_data_fraction', help='training_data_fraction', type=int, required=False,
@@ -40,11 +50,12 @@ parser.add_argument('-tedf', '--test_data_fraction', help='test_data_fraction', 
                     default=1)
 parser.add_argument("--max_grad_norm", default=1.0, type=float, help="Max gradient norm.")
 parser.add_argument("--pretrained_model", default=pretrained_model, type=str, help="pretrained_model")
-
+parser.add_argument("--model_checkpoint_folder", type=str, help="checkpoint folder",
+                    default=os.path.abspath('../resource/model_check_point'))
+parser.add_argument("--model_checkpoint_name", type=str, help="checkpoint file", default=model_checkpoint)
 # Setting
-parser.add_argument('-is', '--imbalance_sampler', help='imbalance_sampler', type=bool, required=False,
-                    default=1)
-parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=base_learning_rate, required=False)
+parser.add_argument('-lr', '--learning_rate', help='model learning rate', default=base_learning_rate, required=False,
+                    type=float)
 parser.add_argument('-bs', '--batch_size', help='training batch size', default=batch_size, required=False)
 # hotel$train$restaurant$attraction$taxi$hospital$police
 parser.add_argument('-trd', '--train_domain', help='training domain',
@@ -87,5 +98,32 @@ parser.add_argument('-ehs', '--encoder_hidden_size', help='encoder hidden size',
                     default=128, type=int, required=False)
 args = vars(parser.parse_args())
 
+# logger
+log_file_name = os.path.abspath('../resource/test_log.log')
+FORMAT = "%(asctime)s %(message)s"
+
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+
+logging.basicConfig(level=logging.INFO,format=FORMAT, filename=log_file_name)
+console_logger = logging.StreamHandler()  # 日志控制台输出
+
+file_logger = logging.FileHandler(log_file_name, mode='a', encoding='UTF-8')
+file_logger.setLevel(logging.INFO)
+
+# 控制台输出格式
+stream_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(lineno)d %(message)s")
+
+# 文件输出格式
+logging_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(lineno)d %(message)s")
+
+file_logger.setFormatter(logging_format)
+console_logger.setFormatter(stream_format)
+
+logger.addHandler(file_logger)
+logger.addHandler(console_logger)
+
+logger.info("|------logger.info-----")
+
 for key in args:
-    print('{}: {}'.format(key, args[key]))
+    logging.info('{}: {}'.format(key, args[key]))

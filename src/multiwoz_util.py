@@ -8,11 +8,13 @@ import os
 import pickle
 import torch
 from multiwoz_config import args, UNK, PAD, CLS, SEP, EXPERIMENT_DOMAINS, UNK_token, PAD_token, CLS_token, \
-    SEP_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, DEVICE
+    SEP_token, DATA_TYPE_SLOT, DATA_TYPE_BELIEF, DATA_TYPE_UTTERANCE, DEVICE, logger
 import json
 import re
 import torch.utils.data as data
 from transformers import RobertaTokenizer
+
+
 tokenizer = RobertaTokenizer.from_pretrained('roberta-base', add_prefix_space=True)
 # preset token tag
 preset_word_num = 4
@@ -53,14 +55,14 @@ def prepare_data(read_from_cache, file_path):
         pickle.dump([data_dict, train, dev, test, word_index_stat, slot_value_dict, slot_type_dict, max_utterance_len],
                     open(file_path, 'wb'))
     # load_glove_embeddings(word_index_stat.word2index)
-    print('data prepared')
+    logger.info('data prepared')
 
-    print("Read %s pairs train" % len(data_dict['train']))
-    print("Read %s pairs dev" % len(data_dict['dev']))
-    print("Read %s pairs test" % len(data_dict['test']))
-    # print("Vocab_size: %s " % word_index_stat.n_words)
-    print("Max. length of dialog words: %s " % max_utterance_len)
-    print("Device = {}".format(DEVICE))
+    logger.info("Read %s pairs train" % len(data_dict['train']))
+    logger.info("Read %s pairs dev" % len(data_dict['dev']))
+    logger.info("Read %s pairs test" % len(data_dict['test']))
+    # logger.info("Vocab_size: %s " % word_index_stat.n_words)
+    logger.info("Max. length of dialog words: %s " % max_utterance_len)
+    logger.info("Device = {}".format(DEVICE))
     return train, dev, test, word_index_stat, slot_value_dict, slot_type_dict
 
 
@@ -103,21 +105,16 @@ def get_sequence(pairs, batch_size, slot_value_dict, slot_type_dict, sample_type
         for idx in shuffle_idx_list:
             data_info_shuffled[k].append(data_info[k][idx])
 
-
     dataset = Dataset(data_info_shuffled, slot_value_dict, slot_type_dict)
 
-    if args["imbalance_sampler"] and sample_type:
-        data_loader = torch.utils.data.DataLoader(dataset=dataset,
-                                                  batch_size=batch_size,
-                                                  # shuffle=type,
-                                                  collate_fn=collate_fn,
-                                                  sampler=ImbalancedDatasetSampler(dataset))
+    if args["multi_gpu"]:
+        train_sampler = torch.utils.data.distributed.DistributedSampler(dataset)
+        dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size, shuffle=False, num_workers=16,
+                                                 pin_memory=True, drop_last=True, sampler=train_sampler)
     else:
-        data_loader = torch.utils.data.DataLoader(dataset=dataset,
-                                                  batch_size=batch_size,
-                                                  shuffle=sample_type,
-                                                  collate_fn=collate_fn)
-    return data_loader
+        dataloader = torch.utils.data.DataLoader(dataset=dataset, batch_size=batch_size,
+                                                 shuffle=sample_type, collate_fn=collate_fn)
+    return dataloader
 
 
 def collate_fn(data_):
@@ -362,7 +359,7 @@ def state_tokenize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                             # Roberta uses BPE tokenizer
                             token_list = tokenizer(slot_value)['input_ids'][1: -1]
                             if len(token_list) == 0:
-                                print(slot_value)
+                                logger.info(slot_value)
                             context_tokenize = tokenizer(dialogue['context'])['input_ids']
                             start_idx = -1
                             for i in range(len(context_tokenize)):
@@ -378,15 +375,15 @@ def state_tokenize(dataset: dict, train_domain, test_domain) -> [dict, dict]:
                             dialogue['label'][slot_name] = [start_idx, end_idx]
 
                             # if start_idx == -1:
-                            #     print(dialogue['context'])
-                            #     print('slot name: {}, slot value: {}'.format(slot_name, slot_value))
-                            #     print(context_tokenize)
-                            #     print(token_list)
+                            #     logger.info(dialogue['context'])
+                            #     logger.info('slot name: {}, slot value: {}'.format(slot_name, slot_value))
+                            #     logger.info(context_tokenize)
+                            #     logger.info(token_list)
                         else:
                             raise ValueError('invalid pretrained model')
                         if start_idx == -1:
                             fail_match += 1
-    print('span fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
+    logger.info('span fail match count: {}, count: {}, ratio: {}'.format(fail_match, count, fail_match / count))
     return dataset, slot_value_dict, slot_type_dict
 
 
@@ -452,11 +449,12 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
 
                 turn_belief_dict = bs_format(fix_general_label_error(turn["belief_state"], False, all_slots))
                 turn_belief_list = [str(k) + '-' + str(v) for k, v in turn_belief_dict.items()]
-                source_text = turn_uttr + ' '
-                for i in range(len(dialog_history)):
-                    source_text += dialog_history[len(dialog_history)-1-i].strip() + ' '
 
-                dialog_history.append(utt_format(turn_uttr))
+                dialog_history.insert(0, utt_format(turn_uttr))
+
+                source_text = ''
+                for i in range(len(dialog_history)):
+                    source_text += dialog_history[i].strip() + ' '
 
                 data_detail = {
                     "ID": dial_dict["dialogue_idx"],
@@ -471,8 +469,8 @@ def load_corpus(all_slots, train_file, dev_file, test_file, valid_idx_set):
 
                 if max_history_len < len(source_text.split()):
                     max_history_len = len(source_text.split())
-    print('domain count: {}'.format(domain_counter))
-    print('corpus loaded')
+    logger.info('domain count: {}'.format(domain_counter))
+    logger.info('corpus loaded')
     return data_dict, max_history_len
 
 
@@ -493,7 +491,7 @@ def create_word_index_mapping(all_slots, train_file, dev_file, test_file, valid_
                 word_index_stat.index_words(turn["transcript"], 'utterance')
                 turn_belief_dict = bs_format(fix_general_label_error(turn["belief_state"], False, all_slots))
                 word_index_stat.index_words(turn_belief_dict, 'belief')
-    print("word index mapping created")
+    logger.info("word index mapping created")
     return word_index_stat
 
 
@@ -560,7 +558,7 @@ def load_glove_embeddings(word_index_dict):
     for key in {UNK, SEP, CLS, PAD}:
         assert key in word_index_dict
 
-    print("Loading Glove Model")
+    logger.info("Loading Glove Model")
     glove_embedding = []
     glove_word_index_dict = {}
     with open(args['full_embedding_path'], 'r', encoding='utf-8') as f:
@@ -570,14 +568,14 @@ def load_glove_embeddings(word_index_dict):
             word = split_line[0]
             word_embedding = np.array(split_line[len(split_line) - 300:], dtype=np.float64)
             if len(word_embedding) != 300:
-                print(word)
-                print(len(split_line))
-                print(split_line)
+                logger.info(word)
+                logger.info(len(split_line))
+                logger.info(split_line)
                 continue
             glove_word_index_dict[word] = line_idx
             glove_embedding.append(word_embedding)
             line_idx += 1
-    print(f"{len(glove_embedding)} words loaded!")
+    logger.info(f"{len(glove_embedding)} words loaded!")
     glove_embedding = np.array(glove_embedding)
 
     embedding_dimension = len(glove_embedding[0])
@@ -1141,7 +1139,7 @@ def main():
 
     entity_embed_dict, relation_embed_dict = load_graph_embeddings(wordnet_embedding_path, wordnet_path)
     graph_embeddings_alignment(entity_embed_dict, word_index_stat.word2index)
-    print('util execute accomplished')
+    logger.info('util execute accomplished')
 
 
 if __name__ == '__main__':

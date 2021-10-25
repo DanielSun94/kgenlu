@@ -2,7 +2,7 @@ import numpy as np
 import torch
 from datetime import datetime
 import csv
-from multiwoz_config import args
+from multiwoz_config import args, logger
 import os
 
 
@@ -137,13 +137,10 @@ def comprehensive_evaluation(evaluation_batch_list, slot_info_dict, data_type, e
     data_to_write_ = sorted(data_to_write_, key=lambda x: x[0])
     for line in data_to_write_:
         data_to_write.append(line)
-    print('epoch: {}'.format(epoch))
-    print(['name', 'type', 'accuracy', 'exist_recall', 'not_exist_recall', 'exist_true', 'exist_false', 'not_exist_true', 'not_exist_false'])
-    for line in data_to_write_:
-        print(line)
+    logger.info('epoch: {}, dataset: {}, general accuracy: {}'.format(epoch, data_type, data_to_write_[0][2]))
 
     current_time = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
     file_path = os.path.join(args['evaluation_save_folder'], 'eval_{}_{}_{}.csv'.format(epoch, data_type, current_time))
     with open(file_path, 'w', newline='', encoding='utf-8-sig') as f:
         csv.writer(f).writerows(data_to_write)
-    return result_dict
+    return result_dict, data_to_write_[0][2]

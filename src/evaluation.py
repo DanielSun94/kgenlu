@@ -114,7 +114,8 @@ def comprehensive_evaluation(evaluation_batch_list, slot_info_dict, data_type, e
     for key in args:
         data_to_write.append([key, args[key]])
     data_to_write.append([data_type])
-    data_to_write.append(['name', 'type', 'accuracy', 'exist_recall', 'not_exist_recall', 'exist_true', 'exist_false', 'not_exist_true', 'not_exist_false'])
+    data_to_write.append(['name', 'type', 'accuracy', 'exist_recall', 'not_exist_recall', 'exist_true', 'exist_false',
+                          'not_exist_true', 'not_exist_false'])
 
     data_to_write_ = []
     for name in result_dict:

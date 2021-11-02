@@ -3,15 +3,15 @@ import torch
 import os
 import logging
 
-epoch = 40
-max_sequence_length = 1000
-multi_gpu = True
-pretrained_model = None # 'roberta' None
+epoch = 30
+max_sequence_length = 512
+multi_gpu = False
+pretrained_model = 'roberta' # 'roberta' None
 data_portion = 100
-d_model = 300
+d_model = 768 # 300 768
 cuda = 'cuda:1'
 base_learning_rate = 1 * 1e-4
-batch_size = 32
+batch_size = 16
 model_checkpoint = ""
 local_rank = -1
 
@@ -23,19 +23,16 @@ UNK, SEP, CLS, PAD = '<unk>', '</s>', '<cls>', '<pad>'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
 # 指代slot可能出现的三种情况，dontcare代表用户无所谓，none代表未提及，span代表有提及，且以句子中matching的方式完成匹配
 # classify代表有提及，且以分类形式完成匹配
-gate_dict = {"dontcare": 0, "none": 1, "span": 2, 'classify': 3}
 
 
 EXPERIMENT_DOMAINS = ["hotel", "train", "restaurant", "attraction", "taxi", 'hospital', 'police']
-multiwoz_data_folder = os.path.abspath('../resource/multiwoz')
-multiwoz_resource_folder = os.path.abspath('../../resource/multiwoz')
 parser = argparse.ArgumentParser(description='Multi-Domain DST')
 
 parser.add_argument('-lor', '--local_rank', help='local_rank', type=int, required=False, default=local_rank)
 parser.add_argument('-mg', '--multi_gpu', help='use multiple GPUs', type=bool, required=False, default=multi_gpu)
 parser.add_argument('-te', '--train_epoch', help='train_epoch', type=int, required=False, default=epoch)
 parser.add_argument('-slr', '--span_loss_ratio', help='span_loss_ratio', type=float, required=False, default=0.8)
-parser.add_argument('-wur', '--warm_up_ratio', help='warm_up_ratio', type=float, required=False, default=0.1)
+parser.add_argument('-wur', '--warm_up_ratio', help='warm_up_ratio', type=float, required=False, default=0.05)
 parser.add_argument('-msl', '--max_sentence_length', help='max_sentence_length', type=int, required=False,
                     default=max_sequence_length)
 parser.add_argument('-tfd', '--training_data_fraction', help='training_data_fraction', type=int, required=False,

@@ -261,9 +261,9 @@ def main():
     model = KGENLU(word_index_stat=word_index_stat, slot_info_dict=slot_info_dict,
                    pretrained_model=args['pretrained_model'], name='kgenlu')
 
-    if args.local_rank != -1:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
+    # if args['local_rank'] != -1:
+    #     model = torch.nn.parallel.DistributedDataParallel(
+    #         model, device_ids=[args.local_rank], output_device=args.local_rank, find_unused_parameters=True)
 
     if args['model_checkpoint_name'] != "":
         model.load_state_dict(torch.load(os.path.join(args['model_checkpoint_folder'],
@@ -287,6 +287,7 @@ def main():
         model.eval()
 
         # validation and test
+        torch.cuda.empty_cache()
         validation_result = validation_and_test_process(val, model, slot_info_dict)
         _, vja = comprehensive_evaluation(validation_result, slot_info_dict, 'validation', epoch)
         test_result = validation_and_test_process(test, model, slot_info_dict)

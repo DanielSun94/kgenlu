@@ -8,6 +8,31 @@
     "refer",
     "inform"
   ],
+  "domain_index": {
+    "hotel": 0,
+    "restaurant": 1,
+    "train": 2,
+    "attraction": 3,
+    "taxi": 4
+  },
+  "slot_index": {
+    "leaveat": 0,
+    "destination": 1,
+    "departure": 2,
+    "arriveby": 3,
+    "day": 4,
+    "time": 5,
+    "food": 6,
+    "pricerange": 7,
+    "name": 8,
+    "area": 9,
+    "people": 10,
+    "stay": 11,
+    "parking": 12,
+    "stars": 13,
+    "internet": 14,
+    "type": 15
+  },
   "slots": [
     "taxi-leaveat",
     "taxi-destination",
@@ -40,6 +65,38 @@
     "train-arriveby",
     "train-departure"
   ],
+  "slots-type": {
+    "taxi-leaveat": "span",
+    "taxi-destination": "span",
+    "taxi-departure": "span",
+    "taxi-arriveby": "span",
+    "restaurant-book-people": "classify",
+    "restaurant-book-day": "classify",
+    "restaurant-book-time": "span",
+    "restaurant-food": "span",
+    "restaurant-pricerange": "classify",
+    "restaurant-name": "span",
+    "restaurant-area": "classify",
+    "hotel-book-people": "classify",
+    "hotel-book-day": "classify",
+    "hotel-book-stay": "classify",
+    "hotel-name": "span",
+    "hotel-area": "classify",
+    "hotel-parking": "classify",
+    "hotel-pricerange": "classify",
+    "hotel-stars": "classify",
+    "hotel-internet": "classify",
+    "hotel-type": "classify",
+    "attraction-type": "classify",
+    "attraction-name": "span",
+    "attraction-area": "classify",
+    "train-book-people": "classify",
+    "train-leaveat": "span",
+    "train-destination": "span",
+    "train-day": "classify",
+    "train-arriveby": "span",
+    "train-departure": "span"
+  },
   "label_maps": {
     "guest house": [
       "guest houses"

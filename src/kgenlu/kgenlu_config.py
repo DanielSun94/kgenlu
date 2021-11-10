@@ -5,6 +5,14 @@ import logging
 
 # task and model setting
 config_name = 'default'
+# use history 和 no_value_assign_strategy旨在为以下的情况提供判断
+# 我们在判定token label 的start index和end index时，其实会出现一种情况，就是token label其实是在历史token里的
+# 这个问题在class type不是hit的情况下可能造成一些问题。就是计算loss的时候，是几个分支的loss都会算的
+# 当你class type是none时，按照道理来讲预期的span index是空的，因为本身不存在这样的预测目标
+# 但是出于历史上存在hit，其实find index可能真的会找到值。如何处理就是一个问题，一种是保留这种情况
+# 另一种是归零。归零时，代表start index和end index都是0
+# 同样的，referred slot等预测指标也会存在其实不存在的问题，也给定两个情况。一个是把不存在也作为一个预测值（value），另一个是不存在时直接忽略\\
+# （label挂-1, miss）
 if config_name == 'default':
     config = {
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
@@ -12,17 +20,25 @@ if config_name == 'default':
         'max_length': 512,
         'epoch': 30,
         'device': 'cuda:1',
-        'auxiliary_domain_assign': True
+        'auxiliary_domain_assign': True,
+        'use_history': False,
+        'max_len': 512,
+        'no_value_assign_strategy': 'miss'  # value
     }
 else:
     raise ValueError('Invalid Config Name')
 
 DEVICE = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
 
+NONE_IDX, DONTCARE_INDEX, HIT_INDEX = 0, 1, 2
 
 parser = argparse.ArgumentParser(description='Knowledge Graph Enhanced NLU (KGENLU)')
 parser.add_argument('--train_domain', help='training domain', default=config['train_domain'], required=False)
 parser.add_argument('--test_domain', help='test domain', default=config['test_domain'], required=False)
+parser.add_argument('--no_value_assign_strategy', help='test domain',
+                    default=config['no_value_assign_strategy'], required=False)
+parser.add_argument('--use_history', help='use history utterance', default=config['use_history'], required=False)
+parser.add_argument('--max_len', help='test domain', default=config['max_len'], required=False)
 parser.add_argument('--auxiliary_domain_assign', help='auxiliary_domain_assign',
                     default=config['auxiliary_domain_assign'], required=False)
 args = vars(parser.parse_args())
@@ -49,8 +65,7 @@ logger.info("|------logger.info-----")
 
 
 # special token
-UNK_id, PAD_id, SEP_id, CLS_id = 0, 1, 2, 3
-UNK_token, PAD_token, SEP_token, CLS_token = '<unk>', '</s>', '<cls>', '<pad>'
+UNK_token, PAD_token, SEP_token, CLS_token = '<unk>', '<pad>', '</s>', '<s>'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
 
 
@@ -63,7 +78,8 @@ dev_idx_path = os.path.join(multiwoz_dataset_folder, 'valListFile.json')
 test_idx_path = os.path.join(multiwoz_dataset_folder, 'testListFile.json')
 label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
-dialogue_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_cache.pkl')
+dialogue_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_cache_{}.pkl')
+dialogue_unstructured_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_coarse_cache_{}.pkl')
 
 
 # act

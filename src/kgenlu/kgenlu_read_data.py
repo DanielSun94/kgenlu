@@ -3,17 +3,22 @@ import pickle
 import json
 import re
 import numpy as np
-import copy
+import torch
+from torch.utils.data import Dataset, DataLoader, RandomSampler
+from tqdm import tqdm
 from kgenlu_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
     label_normalize_path, dialogue_data_cache_path, dialogue_data_path, SEP_token, CLS_token, DOMAIN_IDX_DICT, \
-    SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, dialogue_unstructured_data_cache_path, DONTCARE_INDEX, HIT_INDEX, NONE_IDX
+    SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, dialogue_unstructured_data_cache_path, PAD_token, \
+    classify_slot_value_index_map_path, DEVICE
 from transformers import RobertaTokenizer
 
-# TODO classify case和span case的区分
 # state matching的部分是否能够都对上，什么_booking之类的
 # 其实这样子做标签会非常稀疏，但是因为Trippy也用了类似的做法，那我们也用类似的做法
 overwrite_cache = False
-roberta_tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+if args['pretrained_model'] == 'roberta':
+    tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+else:
+    raise ValueError('')
 NORMALIZE_MAP = json.load(open(label_normalize_path, 'r'))
 domain_slot_list = NORMALIZE_MAP['slots']
 domain_index_map = NORMALIZE_MAP['domain_index']
@@ -31,24 +36,44 @@ active_slot_count = dict()
 unpointable_slot_value_set = set()
 
 
-def prepare_data():
+def prepare_data(overwrite):
     train_idx_list, dev_idx_list, test_idx_list = get_dataset_idx(dev_idx_path, test_idx_path, dialogue_data_path)
     idx_dict = {'train': train_idx_list, 'dev': dev_idx_list, 'test': test_idx_list}
 
     dialogue_data = json.load(open(dialogue_data_path, 'r'))
     act_data = json.load(open(act_data_path, 'r'))
-    dataset = {
-        'train': process_data(idx_dict['train'], dialogue_data, act_data, 'train', overwrite_cache),
-        'dev': process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', overwrite_cache),
-        'test': process_data(idx_dict['test'], dialogue_data, act_data, 'test', overwrite_cache)
-    }
-    return dataset
+    if os.path.exists(classify_slot_value_index_map_path) and not overwrite:
+        classify_slot_value_index_dict, classify_slot_index_value_dict = \
+            pickle.load(open(classify_slot_value_index_map_path, 'rb'))
+    else:
+        classify_slot_value_index_dict, classify_slot_index_value_dict = \
+            get_classify_slot_index_map(idx_dict, dialogue_data, act_data)
+    data = [process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict,
+                         overwrite),
+            process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', classify_slot_value_index_dict,
+                         overwrite),
+            process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict,
+                         overwrite)]
+    return data, classify_slot_value_index_dict, classify_slot_index_value_dict
 
 
-def process_data(idx_list, dialogue_dict, act, data_type, overwrite):
+def get_classify_slot_index_map(idx_dict, dialogue_dict, act_data):
+    idx_set = set(idx_dict['train'] + idx_dict['dev'] + idx_dict['test'])
+    raw_data_dict = {}
+    for dialogue_idx in dialogue_dict:
+        if dialogue_idx not in idx_set:
+            continue
+        if dialogue_idx.strip().split('.')[0] not in act_data:
+            logger.info('act of {} not found'.format(dialogue_idx))
+        utterance_list, state_dict, act_dict = get_dialogue_info(act_data, dialogue_dict, dialogue_idx)
+        raw_data_dict[dialogue_idx] = utterance_list, state_dict, act_dict
+    classify_slot_value_index_dict, classify_slot_index_value_dict = classify_slot_value_indexing(raw_data_dict)
+    return classify_slot_value_index_dict, classify_slot_index_value_dict
+
+
+def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_index_dict, overwrite):
     if os.path.exists(dialogue_unstructured_data_cache_path.format(data_type)) and not overwrite:
-        data_dict, classify_slot_value_index_dict = \
-            pickle.load(open(dialogue_unstructured_data_cache_path.format(data_type), 'rb'))
+        data_dict = pickle.load(open(dialogue_unstructured_data_cache_path.format(data_type), 'rb'))
     else:
         data_dict = {}
         raw_data_dict = {}
@@ -62,71 +87,230 @@ def process_data(idx_list, dialogue_dict, act, data_type, overwrite):
             utterance_list, state_dict, act_dict = get_dialogue_info(act, dialogue_dict, dialogue_idx)
             raw_data_dict[dialogue_idx] = utterance_list, state_dict, act_dict
 
-        classify_slot_value_index_dict, _ = classify_slot_value_indexing(raw_data_dict)
-
         for dialogue_idx in raw_data_dict:
             utterance_list, state_dict, act_dict = raw_data_dict[dialogue_idx]
             data_dict[dialogue_idx] = \
                 dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, classify_slot_value_index_dict)
-        pickle.dump([data_dict, classify_slot_value_index_dict],
-                    open(dialogue_unstructured_data_cache_path.format(data_type), 'wb'))
+        pickle.dump(data_dict, open(dialogue_unstructured_data_cache_path.format(data_type), 'wb'))
 
     logger.info(active_slot_count)
     logger.info('data reorganized, starting transforming data to the model required format')
     if os.path.exists(dialogue_data_cache_path.format(data_type)) and not overwrite:
         processed_data = pickle.load(open(dialogue_data_cache_path.format(data_type), 'rb'))
     else:
-        processed_data = prepare_data_for_model(data_dict, max_len, use_history, classify_slot_value_index_dict)
-    logger.info('prepare process finished')
+        if data_type == 'train' or 'dev':
+            processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict,
+                                                    train_domain_set)
+        else:
+            assert data_type == 'test'
+            processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict, test_domain_set)
+        logger.info('prepare process finished')
+        pickle.dump(processed_data, open(dialogue_data_cache_path.format(data_type), 'wb'))
+    logger.info('constructing dataloader')
+    dataloader = construct_dataloader(processed_data)
+    return dataloader
 
-    return processed_data
+
+def collate_fn(batch):
+    sample_id_list, active_domain_list, active_slot_list, turn_change_label_list, turn_cumulative_label_list, \
+        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list = \
+        [], [], [], [], [], [], {}, {}, {}, []
+    for domain_slot in domain_slot_list:
+        referred_list_dict[domain_slot] = []
+        hit_type_list_dict[domain_slot] = []
+        hit_value_list_dict[domain_slot] = []
+    for sample in batch:
+        sample_id_list.append(sample[0])
+        active_domain_list.append(sample[1])
+        active_slot_list.append(sample[2])
+        turn_change_label_list.append(sample[3])
+        turn_cumulative_label_list.append(sample[4])
+        context_token_id_list.append(sample[5])
+        context_mask_list.append(sample[6])
+        for domain_slot in domain_slot_list:
+            hit_type_list_dict[domain_slot].append(sample[7][domain_slot])
+            hit_value_list_dict[domain_slot].append(sample[8][domain_slot])
+            referred_list_dict[domain_slot].append(sample[9][domain_slot])
+
+    active_domain_list = torch.FloatTensor(active_domain_list)
+    active_slot_list = torch.FloatTensor(active_slot_list)
+    context_token_id_list = torch.LongTensor(context_token_id_list)
+    context_mask_list = torch.BoolTensor(context_mask_list)
+    for domain_slot in domain_slot_list:
+        hit_type_list_dict[domain_slot] = torch.LongTensor(hit_type_list_dict[domain_slot])
+        hit_value_list_dict[domain_slot] = torch.LongTensor(hit_value_list_dict[domain_slot])
+        referred_list_dict[domain_slot] = torch.LongTensor(referred_list_dict[domain_slot])
+    return sample_id_list, active_domain_list, active_slot_list, turn_change_label_list, turn_cumulative_label_list,\
+        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list
+
+
+def construct_dataloader(processed_data):
+    sample_id_list = [item.sample_id for item in processed_data]
+    active_domain_list = [item.active_domain for item in processed_data]
+    active_slot_list = [item.active_slot for item in processed_data]
+    turn_change_label_list = [item.turn_change_label for item in processed_data]
+    turn_cumulative_label_list = [item.turn_cumulative_labels for item in processed_data]
+    context_list = [item.context for item in processed_data]
+    context_mask_list = [item.context_mask for item in processed_data]
+    hit_type_list_dict, hit_value_list_dict, referred_list_dict = {}, {}, {}
+    for domain_slot in domain_slot_list:
+        hit_type_list_dict[domain_slot] = [item.hit_type[domain_slot] for item in processed_data]
+        hit_value_list_dict[domain_slot] = [item.hit_value[domain_slot] for item in processed_data]
+        referred_list_dict[domain_slot] = [item.referred[domain_slot] for item in processed_data]
+    dataset = SampleDataset(sample_id_list, active_domain_list, active_slot_list, turn_change_label_list,
+                            turn_cumulative_label_list, context_list, context_mask_list, hit_type_list_dict,
+                            hit_value_list_dict, referred_list_dict)
+    sampler = RandomSampler(dataset)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
+    return dataloader
+
+
+class SampleDataset(Dataset):
+    def __init__(self, sample_id_list, active_domain_list, active_slot_list, turn_change_label_list,
+                 turn_cumulative_label_list, context_list, context_mask_list, hit_type_list_dict, hit_value_list_dict,
+                 referred_list_dict):
+        self.sample_id_list = sample_id_list
+        self.active_domain_list = active_domain_list
+        self.active_slot_list = active_slot_list
+        self.turn_change_label_list = turn_change_label_list
+        self.turn_cumulative_label_list = turn_cumulative_label_list
+        self.context_list = context_list
+        self.context_mask_list = context_mask_list
+        self.hit_type_list_dict = hit_type_list_dict
+        self.hit_value_list_dict = hit_value_list_dict
+        self.referred_list_dict = referred_list_dict
+
+    def __getitem__(self, index):
+        sample_id = self.sample_id_list[index]
+        active_domain = self.active_domain_list[index]
+        active_slot = self.active_slot_list[index]
+        turn_cumulative_label = self.turn_cumulative_label_list[index]
+        turn_change_label = self.turn_change_label_list[index]
+        context = self.context_list[index]
+        context_mask = self.context_mask_list[index]
+        hit_type_dict, hit_value_dict, referred_dict = {}, {}, {}
+        for domain_slot in domain_slot_list:
+            hit_type_dict[domain_slot] = self.hit_type_list_dict[domain_slot][index]
+            hit_value_dict[domain_slot] = self.hit_value_list_dict[domain_slot][index]
+            referred_dict[domain_slot] = self.referred_list_dict[domain_slot][index]
+        return sample_id, active_domain, active_slot, turn_change_label, turn_cumulative_label, context, context_mask, \
+            hit_type_dict, hit_value_dict, referred_dict
+
+    def __len__(self):
+        return len(self.sample_id_list)
 
 
 class Sample(object):
-    def __init__(self, sample_id, active_domain, active_slot, state, label, history, utterance):
-        super(Sample)
+    def __init__(self, sample_id, active_domain, active_slot, filtered_state, context, context_mask,
+                 turn_change_label, turn_cumulative_labels):
         self.sample_id = sample_id
         self.active_domain = active_domain
         self.active_slot = active_slot
-        self.state = state
-        self.label = label
-        self.history = history
-        self.utterance = utterance
+        self.turn_change_label = turn_change_label
+        self.turn_cumulative_labels = turn_cumulative_labels
+        self.context = context
+        self.context_mask = context_mask
+        self.hit_type, self.hit_value, self.referred = {}, {}, {}
+        for domain_slot in domain_slot_list:
+            self.hit_type[domain_slot] = filtered_state[domain_slot]['hit_type']
+            self.referred[domain_slot] = filtered_state[domain_slot]['referred_slot_idx']
+            if domain_slot_type_map[domain_slot] == 'classify':
+                assert isinstance(filtered_state[domain_slot]['hit_value'], int)
+                self.hit_value[domain_slot] = filtered_state[domain_slot]['hit_value']
+            else:
+                hit_value = filtered_state[domain_slot]['hit_value']
+                assert isinstance(hit_value, tuple) and len(hit_value) == 2
+                self.hit_value[domain_slot] = hit_value[0], hit_value[1]
 
 
-def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_index_dict):
+def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_index_dict, interest_domain):
     data_for_model = []
     for dialogue_idx in data_dict:
-        for turn in data_dict[dialogue_idx]:
-            turn_active_domains = active_domain_structurize(data_dict[dialogue_idx][turn]['active_domain'])
-            turn_active_slots = active_slot_structurize(data_dict[dialogue_idx][turn]['active_slots'])
+        dialogue = data_dict[dialogue_idx]
+        for turn_idx in dialogue:
+            turn_data = dialogue[turn_idx]
+            turn_active_domains = active_domain_structurize(turn_data['active_domain'])
+            turn_active_slots = active_slot_structurize(turn_data['active_slots'])
             turn_utterance_token, turn_utterance_token_map_list = \
-                utterance_tokenize(data_dict[dialogue_idx][turn]['current_turn_utterance_token'])
+                utterance_tokenize(turn_data['current_turn_utterance_token'])
             turn_history_utterance_token, turn_history_utterance_token_map_list \
-                = utterance_tokenize(data_dict[dialogue_idx][turn]['history_utterance_token'])
+                = utterance_tokenize(turn_data['history_utterance_token'])
 
-            context, context_label = joint_alignment_and_truncate(
+            context, context_label_dict, context_mask = joint_alignment_and_truncate(
                 turn_history_utterance_token, turn_history_utterance_token_map_list, turn_utterance_token,
-                turn_utterance_token_map_list, data_dict[dialogue_idx][turn]['state'], max_input_length)
-            turn_state = state_structurize(data_dict[dialogue_idx][turn]['state'], context, context_label,
-                                           classify_slot_value_index_dict)
-            turn_label = data_dict[dialogue_idx][turn]['turn_change_state']
+                turn_utterance_token_map_list, turn_data['state'], max_input_length)
+            turn_state = state_structurize(turn_data['state'], context_label_dict, classify_slot_value_index_dict)
+            filtered_state = irrelevant_domain_label_mask(turn_state, interest_domain)
+            turn_change_label = turn_data['turn_change_state']
+            turn_cumulative_labels = turn_data['turn_cumulative_labels']
 
             data_for_model.append(
-                Sample(sample_id=dialogue_idx+'-'+str(turn),
+                Sample(sample_id=dialogue_idx+'-'+str(turn_idx),
                        active_domain=turn_active_domains,
                        active_slot=turn_active_slots,
-                       state=turn_state,
-                       label=turn_label,
-                       history=turn_history_utterance_token,
-                       utterance=turn_utterance_token)
+                       filtered_state=filtered_state,
+                       turn_change_label=turn_change_label,
+                       turn_cumulative_labels=turn_cumulative_labels,
+                       context=context,
+                       context_mask=context_mask)
             )
-    return data_dict
+    return data_for_model
+
+
+def irrelevant_domain_label_mask(turn_state, interest_domain):
+    filtered_turn_state = {}
+    for domain_slot in domain_slot_list:
+        filtered_turn_state[domain_slot] = {}
+        if domain_slot.strip().split('-')[0] not in interest_domain:
+            filtered_turn_state[domain_slot]['hit_type'] = -1
+            filtered_turn_state[domain_slot]['referred_slot_idx'] = -1
+            if domain_slot_type_map[domain_slot] == 'classify':
+                filtered_turn_state[domain_slot]['hit_value'] = -1
+            else:
+                filtered_turn_state[domain_slot]['hit_value'] = -1, -1
+        else:
+            filtered_turn_state[domain_slot]['hit_type'] = turn_state[domain_slot]['hit_type']
+            filtered_turn_state[domain_slot]['referred_slot_idx'] = turn_state[domain_slot]['referred_slot_idx']
+            filtered_turn_state[domain_slot]['hit_value'] = turn_state[domain_slot]['hit_value']
+    return filtered_turn_state
 
 
 def joint_alignment_and_truncate(turn_history_utterance_token, turn_history_utterance_token_map_list,
                                  turn_utterance_token, turn_utterance_token_map_list, turn_state, max_input_length):
-    return 0, 0
+    context = turn_utterance_token + [0] + turn_history_utterance_token
+    context_label_dict = {}
+    for domain_slot in domain_slot_list:
+        token_label = turn_state[domain_slot]['token_label']
+        history_token_label = turn_state[domain_slot]['history_token_label']
+        aligned_turn_label, aligned_history_label = [], []
+        assert turn_utterance_token_map_list[-1] == len(token_label) - 1
+        assert turn_history_utterance_token_map_list[-1] == len(history_token_label) - 1
+
+        for origin_index in turn_utterance_token_map_list:
+            aligned_turn_label.append(token_label[origin_index])
+        for origin_index in turn_history_utterance_token_map_list:
+            aligned_history_label.append(history_token_label[origin_index])
+        if not use_history:
+            aligned_history_label = [0 for _ in aligned_history_label]
+        context_label_dict[domain_slot] = aligned_turn_label + [0] + aligned_history_label
+
+    if len(context) > max_input_length:
+        context = context[: max_input_length]
+        for domain_slot in domain_slot_list:
+            context_label_dict[domain_slot] = context_label_dict[domain_slot][: max_input_length]
+        context_mask = [1 for _ in range(max_input_length)]
+    else:
+        padding_num = max_input_length - len(context)
+        padding_token = tokenizer.convert_tokens_to_ids([' '+PAD_token])
+        context_mask = [0] * len(context) + [1] * padding_num
+        context = context + padding_token * padding_num
+        for domain_slot in domain_slot_list:
+            context_label_dict[domain_slot] = context_label_dict[domain_slot] + [0] * padding_num
+        assert len(context_mask) == max_input_length
+
+    for domain_slot in domain_slot_list:
+        assert len(context) == len(context_label_dict[domain_slot])
+    return context, context_label_dict, context_mask
 
 
 def active_domain_structurize(active_domains):
@@ -146,17 +330,17 @@ def active_slot_structurize(active_slots):
 def utterance_tokenize(utterance_token):
     origin_token_idx, new_token_list, new_token_origin_token_map_list = 0, list(), list()
     for token in utterance_token:
-        new_tokens = roberta_tokenizer.tokenize(' ' + token)
+        new_tokens = tokenizer.tokenize(' ' + token)
         assert len(new_tokens) >= 1
         for new_token in new_tokens:
             new_token_list.append(new_token)
             new_token_origin_token_map_list.append(origin_token_idx)
         origin_token_idx += 1
-    new_token_list = roberta_tokenizer.convert_tokens_to_ids(new_token_list)
+    new_token_list = tokenizer.convert_tokens_to_ids(new_token_list)
     return new_token_list, new_token_origin_token_map_list
 
 
-def state_structurize(state, context, context_label, classify_slot_value_index_dict):
+def state_structurize(state, context_label_dict, classify_slot_value_index_dict):
     reorganized_state = {}
     for domain_slot in state:
         if domain_slot not in reorganized_state:
@@ -164,8 +348,6 @@ def state_structurize(state, context, context_label, classify_slot_value_index_d
         class_type = state[domain_slot]['class_type']
         referred_slot = state[domain_slot]['referred_slot']
         classify_value_index = state[domain_slot]['classify_value']
-        token_label = state[domain_slot]['token_label']
-        history_label = state[domain_slot]['history_label']
 
         # initialize
         if no_value_assign_strategy == 'miss':
@@ -175,7 +357,7 @@ def state_structurize(state, context, context_label, classify_slot_value_index_d
             else:
                 hit_value = -1, -1
         elif no_value_assign_strategy == 'value':
-            referred_slot_idx = 31
+            referred_slot_idx = 30
             if domain_slot_type_map[domain_slot] == 'classify':
                 hit_value = len(classify_slot_value_index_dict[domain_slot])
             else:
@@ -201,33 +383,31 @@ def state_structurize(state, context, context_label, classify_slot_value_index_d
 
         # 注意，因为history的补充label，因此span case的标签标记是和class type无关，终归是要做的
         if domain_slot_type_map[domain_slot] == 'span':
-            hit_value = span_label_reorganize(turn_utterance_token_map_list, token_label, history_label,
-                                              turn_history_utterance_token_map_list, use_history, max_len)
+            hit_value = span_idx_extract(context_label_dict, domain_slot, no_value_assign_strategy)
 
         reorganized_state[domain_slot]['hit_value'] = hit_value
         reorganized_state[domain_slot]['referred_slot_idx'] = referred_slot_idx
         reorganized_state[domain_slot]['hit_type'] = hit_type
-    return state
+    return reorganized_state
 
 
-def span_label_reorganize(turn_utterance_token_map_list, token_label, history_label,
-                          turn_history_utterance_token_map_list, history_flag, max_seq_length):
-    start_index, end_index = -1, -1
-    assert turn_utterance_token_map_list[-1] == len(token_label) - 1
-    assert turn_history_utterance_token_map_list[-1] == len(history_label) - 1
-    if history_flag:
-        new_history_label = []
-        for origin_index in turn_history_utterance_token_map_list:
-            new_history_label.append(history_label[origin_index])
+def span_idx_extract(context_label_dict, domain_slot, no_value_assign):
+    if no_value_assign == 'miss':
+        start_idx, end_idx = -1, -1
     else:
-        new_history_label = [0 for _ in turn_history_utterance_token_map_list]
-
-    new_current_label = []
-    for origin_index in turn_utterance_token_map_list:
-        new_current_label.append(token_label[origin_index])
-
-    context = new_current_label
-    return 0, 0
+        assert no_value_assign == 'value'
+        start_idx, end_idx = 0, 0
+    if domain_slot_type_map[domain_slot] == 'span':
+        if 1 in context_label_dict[domain_slot]:
+            start_idx = context_label_dict[domain_slot].index(1)
+            if 0 not in context_label_dict[domain_slot][start_idx:]:
+                end_idx = len(context_label_dict[domain_slot][start_idx:]) + start_idx - 1
+            else:
+                end_idx = context_label_dict[domain_slot][start_idx:].index(0) + start_idx - 1
+    else:
+        assert domain_slot_type_map[domain_slot] == 'classify'
+        assert np.sum(np.array(context_label_dict[domain_slot])) == 0
+    return start_idx, end_idx
 
 
 def get_span_index(turn_utterance_token_map_list, origin_utterance_label):
@@ -301,6 +481,8 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
 
         active_domain, active_slots, inform_info, inform_slot_filled_dict = \
             act_reorganize_and_normalize(act_dict, turn_idx, args['auxiliary_domain_assign'])
+        if turn_idx == 0:
+            assert 1 not in active_domain and 1 not in active_slots
 
         reorganize_data[turn_idx]['active_domain'] = active_domain
         reorganize_data[turn_idx]['active_slots'] = active_slots
@@ -356,8 +538,10 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
             reorganize_data[turn_idx]['state'][domain_slot]['classify_value'] = classify_value
             reorganize_data[turn_idx]['state'][domain_slot]['token_label'] = [0] + turn_utterance_token_label + [0]
             reorganize_data[turn_idx]['state'][domain_slot]['referred_slot'] = referred_slot
-            reorganize_data[turn_idx]['state'][domain_slot]['history_label'] = [0] + history_token_label[domain_slot]
+            reorganize_data[turn_idx]['state'][domain_slot]['history_token_label'] = \
+                [0] + history_token_label[domain_slot]
             reorganize_data[turn_idx]['turn_change_state'] = modified_slots
+            reorganize_data[turn_idx]['turn_cumulative_labels'] = cumulative_labels
 
             assert len(history_token_label[domain_slot]) == len(history_token)
 
@@ -414,7 +598,7 @@ def check_slot_referral(value_label, slot, seen_slots):
     for s in seen_slots:
         # Avoid matches for slots that share values with different meaning.
         # hotel-internet and -parking are handled separately as Boolean slots.
-        if s == 'hotel-stars' or s == 'hotel-internet' or s == 'hotel-parking': # 这些是classification问题
+        if s == 'hotel-stars' or s == 'hotel-internet' or s == 'hotel-parking':  # 这些是classification问题
             continue
         if re.match("(hotel|restaurant)-book-people", s) and slot == 'hotel-book-stay':
             continue
@@ -569,6 +753,11 @@ def state_extract(cumulative_labels, state_dict):
 
 
 def act_reorganize_and_normalize(act_dict, turn_idx, auxiliary_domain_assign):
+    """
+    由于数据被左移了一位，第一轮也就是turn_idx = 0 时，system utterance是空的，对应的utterance是空的。
+    在整理后的数据所有的act turn全部向右移位一次
+    而最后一个turn的action是greeting，被删除。因此，尽管原先dialogue act的turn从1起数，而我们编号中从零起数，但是act没有必要移位
+    """
     active_domain, active_slots, inform_info, inform_slot_filled_dict = set(), set(), dict(), dict()
     for domain_slot in domain_slot_list:
         inform_slot_filled_dict[domain_slot] = 0
@@ -612,7 +801,7 @@ def act_reorganize_and_normalize(act_dict, turn_idx, auxiliary_domain_assign):
         act_info = turn_act_dict[act_name]
         # assign act label
         if act_type == 'inform' or act_type == 'recommend' or act_type == 'select' or act_type == 'book':
-            if act_domain == 'booking': # did not consider booking case
+            if act_domain == 'booking':  # did not consider booking case
                 continue
             for item in act_info:
                 slot = item[0].lower().strip()
@@ -770,7 +959,7 @@ def normalize_time(text):
     # Map 12 hour times to 24 hour times
     text = re.sub("(\d{2})(:\d{2}) ?p\.?m\.?",
                   lambda x: str(int(x.groups()[0]) + 12 if int(x.groups()[0]) < 12 else int(x.groups()[0])) +
-                            x.groups()[1], text)
+                  x.groups()[1], text)
     text = re.sub("(^| )24:(\d{2})", r"\g<1>00:\2", text)  # Correct times that use 24 as hour
     return text
 
@@ -800,7 +989,7 @@ def normalize_label(slot, value_label):
         return "none"
 
     # Normalization of time slots
-    if "leaveAt" in slot or "arriveBy" in slot or slot == 'restaurant-book_time':
+    if "leaveat" in slot or "arriveby" in slot or slot == 'restaurant-book_time':
         return normalize_time(value_label)
 
     # Normalization
@@ -812,7 +1001,16 @@ def normalize_label(slot, value_label):
 
 def main():
     logger.info('label_map load success')
-    prepare_data()
+    data, classify_slot_value_index_dict, classify_slot_index_value_dict = prepare_data(overwrite_cache)
+    train_loader, dev_loader, test_loader = data
+    batch_count = 0
+    for _ in tqdm(train_loader):
+        batch_count += 1
+    for _ in tqdm(dev_loader):
+        batch_count += 1
+    for _ in tqdm(test_loader):
+        batch_count += 1
+    print(batch_count)
     logger.info('data read success')
 
     print(unpointable_slot_value_set)

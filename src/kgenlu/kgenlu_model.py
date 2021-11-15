@@ -1,14 +1,11 @@
-import json
 import torch
 from tqdm import tqdm
-from kgenlu_read_data import prepare_data, Sample
-from kgenlu_config import label_normalize_path, args, logger, DEVICE, PAD_token
+from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
+from kgenlu_config import args, logger, DEVICE, PAD_token
 from torch import nn
 from transformers import RobertaModel, AlbertModel
 
-NORMALIZE_MAP = json.load(open(label_normalize_path, 'r'))
-domain_slot_list = NORMALIZE_MAP['slots']
-domain_slot_type_map = NORMALIZE_MAP['slots-type']
+
 no_value_assign_strategy = args['no_value_assign_strategy']
 
 
@@ -67,6 +64,8 @@ class KGENLU(nn.Module):
         active_slot = data[2].to(DEVICE)
         context_token = data[5].to(DEVICE)
         context_mask = (1 - data[9].type(torch.uint8)).to(DEVICE)
+
+        # predict
         referred_dict, hit_type_dict, hit_value_dict = {}, {}, {}
         for domain_slot in domain_slot_list:
             referred_dict[domain_slot] = data[6][domain_slot].to(DEVICE)
@@ -74,10 +73,7 @@ class KGENLU(nn.Module):
             hit_value_dict[domain_slot] = data[8][domain_slot].to(DEVICE)
 
         encode = self.encoder(context_token, padding_mask=context_mask)
-
-        predict_gate = {}
-        predict_dict = {}
-        referred_dict = {}
+        predict_gate, predict_dict, referred_dict = {}, {}, {}
         # Choose the output of the first token ([CLS]) to predict gate and classification)
         for domain_slot in domain_slot_list:
             predict_gate[domain_slot] = self.gate[domain_slot](encode[:, 0, :])

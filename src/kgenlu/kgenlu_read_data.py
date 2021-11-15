@@ -4,17 +4,17 @@ import json
 import re
 import numpy as np
 import torch
+import math
 from torch.utils.data import Dataset, DataLoader, RandomSampler
 from tqdm import tqdm
+import random
 from kgenlu_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
     label_normalize_path, dialogue_data_cache_path, dialogue_data_path, SEP_token, CLS_token, DOMAIN_IDX_DICT, \
-    SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, dialogue_unstructured_data_cache_path, PAD_token, \
-    classify_slot_value_index_map_path, DEVICE
+    SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, PAD_token, classify_slot_value_index_map_path
 from transformers import RobertaTokenizer
 
 # state matching的部分是否能够都对上，什么_booking之类的
 # 其实这样子做标签会非常稀疏，但是因为Trippy也用了类似的做法，那我们也用类似的做法
-overwrite_cache = False
 if args['pretrained_model'] == 'roberta':
     tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
 else:
@@ -28,6 +28,7 @@ label_normalize_map = NORMALIZE_MAP['label_maps']
 train_domain = args['train_domain']
 test_domain = args['test_domain']
 use_history = args['use_history']
+data_fraction = args['train_data_fraction']
 no_value_assign_strategy = args['no_value_assign_strategy']
 max_len = args['max_len']
 train_domain_set = set(train_domain.strip().split('$'))
@@ -37,6 +38,7 @@ unpointable_slot_value_set = set()
 
 
 def prepare_data(overwrite):
+    logger.info('start prepare data, overwrite flag: {}'.format(overwrite))
     train_idx_list, dev_idx_list, test_idx_list = get_dataset_idx(dev_idx_path, test_idx_path, dialogue_data_path)
     idx_dict = {'train': train_idx_list, 'dev': dev_idx_list, 'test': test_idx_list}
 
@@ -48,12 +50,15 @@ def prepare_data(overwrite):
     else:
         classify_slot_value_index_dict, classify_slot_index_value_dict = \
             get_classify_slot_index_map(idx_dict, dialogue_data, act_data)
+        pickle.dump([classify_slot_value_index_dict, classify_slot_index_value_dict],
+                    open(classify_slot_value_index_map_path, 'wb'))
     data = [process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict,
                          overwrite),
             process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', classify_slot_value_index_dict,
                          overwrite),
             process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict,
                          overwrite)]
+    logger.info('data prepared')
     return data, classify_slot_value_index_dict, classify_slot_index_value_dict
 
 
@@ -72,8 +77,8 @@ def get_classify_slot_index_map(idx_dict, dialogue_dict, act_data):
 
 
 def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_index_dict, overwrite):
-    if os.path.exists(dialogue_unstructured_data_cache_path.format(data_type)) and not overwrite:
-        data_dict = pickle.load(open(dialogue_unstructured_data_cache_path.format(data_type), 'rb'))
+    if os.path.exists(dialogue_data_cache_path.format(data_type)) and not overwrite:
+        dataset = pickle.load(open(dialogue_data_cache_path.format(data_type), 'rb'))
     else:
         data_dict = {}
         raw_data_dict = {}
@@ -91,13 +96,9 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
             utterance_list, state_dict, act_dict = raw_data_dict[dialogue_idx]
             data_dict[dialogue_idx] = \
                 dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, classify_slot_value_index_dict)
-        pickle.dump(data_dict, open(dialogue_unstructured_data_cache_path.format(data_type), 'wb'))
 
-    logger.info(active_slot_count)
-    logger.info('data reorganized, starting transforming data to the model required format')
-    if os.path.exists(dialogue_data_cache_path.format(data_type)) and not overwrite:
-        processed_data = pickle.load(open(dialogue_data_cache_path.format(data_type), 'rb'))
-    else:
+        logger.info(active_slot_count)
+        logger.info('data reorganized, starting transforming data to the model required format')
         if data_type == 'train' or 'dev':
             processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict,
                                                     train_domain_set)
@@ -105,16 +106,25 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
             assert data_type == 'test'
             processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict, test_domain_set)
         logger.info('prepare process finished')
-        pickle.dump(processed_data, open(dialogue_data_cache_path.format(data_type), 'wb'))
-    logger.info('constructing dataloader')
-    dataloader = construct_dataloader(processed_data)
+        logger.info('constructing dataloader')
+        dataset = construct_dataloader(processed_data, data_type)
+        pickle.dump(dataset, open(dialogue_data_cache_path.format(data_type), 'wb'))
+
+    if data_type == 'train':
+        assert 0.01 <= float(data_fraction) <= 1
+        dataset = SampleDataset(*dataset.get_fraction_data(float(data_fraction)))
+        sampler = RandomSampler(dataset)
+        dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
+    else:
+        sampler = RandomSampler(dataset)
+        dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
     return dataloader
 
 
 def collate_fn(batch):
     sample_id_list, active_domain_list, active_slot_list, turn_change_label_list, turn_cumulative_label_list, \
-        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list = \
-        [], [], [], [], [], [], {}, {}, {}, []
+        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list, \
+        last_turn_state_list = [], [], [], [], [], [], {}, {}, {}, [], []
     for domain_slot in domain_slot_list:
         referred_list_dict[domain_slot] = []
         hit_type_list_dict[domain_slot] = []
@@ -127,10 +137,11 @@ def collate_fn(batch):
         turn_cumulative_label_list.append(sample[4])
         context_token_id_list.append(sample[5])
         context_mask_list.append(sample[6])
+        last_turn_state_list.append(sample[7])
         for domain_slot in domain_slot_list:
-            hit_type_list_dict[domain_slot].append(sample[7][domain_slot])
-            hit_value_list_dict[domain_slot].append(sample[8][domain_slot])
-            referred_list_dict[domain_slot].append(sample[9][domain_slot])
+            hit_type_list_dict[domain_slot].append(sample[8][domain_slot])
+            hit_value_list_dict[domain_slot].append(sample[9][domain_slot])
+            referred_list_dict[domain_slot].append(sample[10][domain_slot])
 
     active_domain_list = torch.FloatTensor(active_domain_list)
     active_slot_list = torch.FloatTensor(active_slot_list)
@@ -141,10 +152,12 @@ def collate_fn(batch):
         hit_value_list_dict[domain_slot] = torch.LongTensor(hit_value_list_dict[domain_slot])
         referred_list_dict[domain_slot] = torch.LongTensor(referred_list_dict[domain_slot])
     return sample_id_list, active_domain_list, active_slot_list, turn_change_label_list, turn_cumulative_label_list,\
-        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list
+        context_token_id_list, referred_list_dict, hit_type_list_dict, hit_value_list_dict, context_mask_list, \
+        last_turn_state_list
 
 
-def construct_dataloader(processed_data):
+def construct_dataloader(processed_data, data_type):
+
     sample_id_list = [item.sample_id for item in processed_data]
     active_domain_list = [item.active_domain for item in processed_data]
     active_slot_list = [item.active_slot for item in processed_data]
@@ -152,23 +165,52 @@ def construct_dataloader(processed_data):
     turn_cumulative_label_list = [item.turn_cumulative_labels for item in processed_data]
     context_list = [item.context for item in processed_data]
     context_mask_list = [item.context_mask for item in processed_data]
+    last_turn_label = [item.last_turn_label for item in processed_data]
     hit_type_list_dict, hit_value_list_dict, referred_list_dict = {}, {}, {}
     for domain_slot in domain_slot_list:
         hit_type_list_dict[domain_slot] = [item.hit_type[domain_slot] for item in processed_data]
         hit_value_list_dict[domain_slot] = [item.hit_value[domain_slot] for item in processed_data]
         referred_list_dict[domain_slot] = [item.referred[domain_slot] for item in processed_data]
-    dataset = SampleDataset(sample_id_list, active_domain_list, active_slot_list, turn_change_label_list,
-                            turn_cumulative_label_list, context_list, context_mask_list, hit_type_list_dict,
-                            hit_value_list_dict, referred_list_dict)
-    sampler = RandomSampler(dataset)
-    dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
-    return dataloader
+
+    if data_type == 'train':
+        idx_list = [i for i in range(len(sample_id_list))]
+        random.shuffle(idx_list)
+        new_sample_id_list, new_active_domain_list, new_active_slot_list, new_turn_change_label_list, \
+            new_turn_cumulative_label_list, new_context_list, new_context_mask_list, new_last_turn_label,\
+            new_hit_type_list_dict, new_hit_value_list_dict, new_referred_list_dict = \
+            [], [], [], [], [], [], [], [], {}, {}, {}
+        for domain_slot in domain_slot_list:
+            new_hit_type_list_dict[domain_slot] = []
+            new_hit_value_list_dict[domain_slot] = []
+            new_referred_list_dict[domain_slot] = []
+        for idx in idx_list:
+            new_sample_id_list.append(sample_id_list[idx])
+            new_active_domain_list.append(active_domain_list[idx])
+            new_active_slot_list.append(active_slot_list[idx])
+            new_turn_change_label_list.append(turn_change_label_list[idx])
+            new_turn_cumulative_label_list.append(turn_cumulative_label_list[idx])
+            new_context_list.append(context_list[idx])
+            new_last_turn_label.append(last_turn_label[idx])
+            new_context_mask_list.append(context_mask_list[idx])
+            for domain_slot in domain_slot_list:
+                new_hit_type_list_dict[domain_slot].append(hit_type_list_dict[domain_slot][idx])
+                new_hit_value_list_dict[domain_slot].append(hit_value_list_dict[domain_slot][idx])
+                new_referred_list_dict[domain_slot].append(referred_list_dict[domain_slot][idx])
+        dataset = \
+            SampleDataset(new_sample_id_list, new_active_domain_list, new_active_slot_list, new_turn_change_label_list,
+                          new_turn_cumulative_label_list, new_context_list, new_context_mask_list, new_last_turn_label,
+                          new_hit_type_list_dict, new_hit_value_list_dict, new_referred_list_dict)
+    else:
+        dataset = SampleDataset(sample_id_list, active_domain_list, active_slot_list, turn_change_label_list,
+                                turn_cumulative_label_list, context_list, context_mask_list, last_turn_label,
+                                hit_type_list_dict, hit_value_list_dict, referred_list_dict)
+    return dataset
 
 
 class SampleDataset(Dataset):
     def __init__(self, sample_id_list, active_domain_list, active_slot_list, turn_change_label_list,
-                 turn_cumulative_label_list, context_list, context_mask_list, hit_type_list_dict, hit_value_list_dict,
-                 referred_list_dict):
+                 turn_cumulative_label_list, context_list, context_mask_list, last_turn_label, hit_type_list_dict,
+                 hit_value_list_dict, referred_list_dict):
         self.sample_id_list = sample_id_list
         self.active_domain_list = active_domain_list
         self.active_slot_list = active_slot_list
@@ -176,6 +218,7 @@ class SampleDataset(Dataset):
         self.turn_cumulative_label_list = turn_cumulative_label_list
         self.context_list = context_list
         self.context_mask_list = context_mask_list
+        self.last_turn_label = last_turn_label
         self.hit_type_list_dict = hit_type_list_dict
         self.hit_value_list_dict = hit_value_list_dict
         self.referred_list_dict = referred_list_dict
@@ -187,6 +230,7 @@ class SampleDataset(Dataset):
         turn_cumulative_label = self.turn_cumulative_label_list[index]
         turn_change_label = self.turn_change_label_list[index]
         context = self.context_list[index]
+        last_turn_label = self.last_turn_label[index]
         context_mask = self.context_mask_list[index]
         hit_type_dict, hit_value_dict, referred_dict = {}, {}, {}
         for domain_slot in domain_slot_list:
@@ -194,7 +238,27 @@ class SampleDataset(Dataset):
             hit_value_dict[domain_slot] = self.hit_value_list_dict[domain_slot][index]
             referred_dict[domain_slot] = self.referred_list_dict[domain_slot][index]
         return sample_id, active_domain, active_slot, turn_change_label, turn_cumulative_label, context, context_mask, \
-            hit_type_dict, hit_value_dict, referred_dict
+            last_turn_label, hit_type_dict, hit_value_dict, referred_dict
+
+    def get_fraction_data(self, fraction):
+        assert isinstance(fraction, float) and 0.01 <= fraction <= 1.0
+        new_len = math.floor(len(self.sample_id_list) * fraction)
+        new_sample_id_list = self.sample_id_list[: new_len]
+        new_active_domain_list = self.active_domain_list[: new_len]
+        new_active_slot_list = self.active_slot_list[: new_len]
+        new_turn_change_label_list = self.turn_change_label_list[: new_len]
+        new_turn_cumulative_label_list = self.turn_cumulative_label_list[: new_len]
+        new_context_list = self.context_list[: new_len]
+        new_context_mask_list = self.context_mask_list[: new_len]
+        new_last_turn_label = self.last_turn_label[: new_len]
+        new_hit_type_list_dict, new_hit_value_list_dict, new_referred_list_dict = {}, {}, {}
+        for domain_slot in domain_slot_list:
+            new_hit_type_list_dict[domain_slot] = self.hit_type_list_dict[domain_slot][: new_len]
+            new_hit_value_list_dict[domain_slot] = self.hit_value_list_dict[domain_slot][: new_len]
+            new_referred_list_dict[domain_slot] = self.referred_list_dict[domain_slot][: new_len]
+        return new_sample_id_list, new_active_domain_list, new_active_slot_list, new_turn_change_label_list,\
+            new_turn_cumulative_label_list, new_context_list, new_context_mask_list, new_last_turn_label,\
+            new_hit_type_list_dict, new_hit_value_list_dict, new_referred_list_dict
 
     def __len__(self):
         return len(self.sample_id_list)
@@ -202,12 +266,13 @@ class SampleDataset(Dataset):
 
 class Sample(object):
     def __init__(self, sample_id, active_domain, active_slot, filtered_state, context, context_mask,
-                 turn_change_label, turn_cumulative_labels):
+                 turn_change_label, turn_cumulative_labels, last_turn_label):
         self.sample_id = sample_id
         self.active_domain = active_domain
         self.active_slot = active_slot
         self.turn_change_label = turn_change_label
         self.turn_cumulative_labels = turn_cumulative_labels
+        self.last_turn_label = last_turn_label
         self.context = context
         self.context_mask = context_mask
         self.hit_type, self.hit_value, self.referred = {}, {}, {}
@@ -243,6 +308,7 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             filtered_state = irrelevant_domain_label_mask(turn_state, interest_domain)
             turn_change_label = turn_data['turn_change_state']
             turn_cumulative_labels = turn_data['turn_cumulative_labels']
+            last_turn_label = turn_data['last_turn_label']
 
             data_for_model.append(
                 Sample(sample_id=dialogue_idx+'-'+str(turn_idx),
@@ -252,6 +318,7 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
                        turn_change_label=turn_change_label,
                        turn_cumulative_labels=turn_cumulative_labels,
                        context=context,
+                       last_turn_label=last_turn_label,
                        context_mask=context_mask)
             )
     return data_for_model
@@ -477,7 +544,6 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
         # typically doesn't contain useful information)
         # And the act of first turn is empty and the act of last turn will be discard
         reorganize_data[turn_idx] = {}
-        value_dict, inform_dict, class_type_dict, referral_dict = {}, {}, {}, {}
 
         active_domain, active_slots, inform_info, inform_slot_filled_dict = \
             act_reorganize_and_normalize(act_dict, turn_idx, args['auxiliary_domain_assign'])
@@ -502,6 +568,7 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
             [CLS_token] + current_turn_utterance_token + [SEP_token]
 
         reorganize_data[turn_idx]['history_utterance'] = CLS_token + ' ' + history
+        reorganize_data[turn_idx]['last_turn_label'] = last_turn_label
         reorganize_data[turn_idx]['history_utterance_token'] = [CLS_token] + history_token
         reorganize_data[turn_idx]['state'] = {}
 
@@ -528,11 +595,11 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
                    len(system_utterance_token) + len(user_utterance_token) + 1
 
             if class_type == 'unpointable':
-                class_type_dict[domain_slot] = 'none'
-                referral_dict[domain_slot] = 'none'
+                class_type = 'none'
+                referred_slot = 'none'
             else:
-                class_type_dict[domain_slot] = class_type
-                referral_dict[domain_slot] = referred_slot
+                class_type = class_type
+                referred_slot = referred_slot
 
             reorganize_data[turn_idx]['state'][domain_slot]['class_type'] = class_type
             reorganize_data[turn_idx]['state'][domain_slot]['classify_value'] = classify_value
@@ -1001,7 +1068,7 @@ def normalize_label(slot, value_label):
 
 def main():
     logger.info('label_map load success')
-    data, classify_slot_value_index_dict, classify_slot_index_value_dict = prepare_data(overwrite_cache)
+    data, classify_slot_value_index_dict, classify_slot_index_value_dict = prepare_data(False)
     train_loader, dev_loader, test_loader = data
     batch_count = 0
     for _ in tqdm(train_loader):

@@ -21,6 +21,7 @@ if config_name == 'roberta':
         'max_length': 512,
         'batch_size': 32,
         'epoch': 30,
+        'train_data_fraction': 1.0,
         'encoder_d_model': 768,
         'learning_rate': 0.00001,
         'device': 'cuda:1',
@@ -39,6 +40,7 @@ NONE_IDX, DONTCARE_INDEX, HIT_INDEX = 0, 1, 2
 
 parser = argparse.ArgumentParser(description='Knowledge Graph Enhanced NLU (KGENLU)')
 parser.add_argument('--train_domain', help='training domain', default=config['train_domain'], required=False)
+parser.add_argument('--train_data_fraction', help='data portion', default=config['train_data_fraction'], required=False)
 parser.add_argument('--epoch', help='training epoch', default=config['epoch'], required=False)
 parser.add_argument('--learning_rate', help='learning_rate', default=config['learning_rate'], required=False)
 parser.add_argument('--encoder_d_model', help='encoder_d_model', default=config['encoder_d_model'], required=False)
@@ -84,6 +86,8 @@ DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'be
 # resource path
 multiwoz_dataset_folder = os.path.abspath('../../resource/multiwoz')
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
+# dataset, time, epoch, general acc
+result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}_{}_epoch_{}_{}.csv')
 # train_idx_path = os.path.join(multiwoz_dataset_folder, 'trainListFile.json')
 dialogue_data_path = os.path.join(multiwoz_dataset_folder, 'data.json')
 dev_idx_path = os.path.join(multiwoz_dataset_folder, 'valListFile.json')
@@ -91,7 +95,7 @@ test_idx_path = os.path.join(multiwoz_dataset_folder, 'testListFile.json')
 label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
 dialogue_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_cache_{}.pkl')
-dialogue_unstructured_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_coarse_cache_{}.pkl')
+# dialogue_unstructured_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_coarse_cache_{}.pkl')
 classify_slot_value_index_map_path = os.path.join(multiwoz_dataset_folder, 'classify_slot_value_index_map_path.pkl')
 
 

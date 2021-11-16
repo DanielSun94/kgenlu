@@ -1,10 +1,9 @@
 import torch
 from tqdm import tqdm
 from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
-from kgenlu_config import args, logger, DEVICE, PAD_token
+from kgenlu_config import args, logger, PAD_token
 from torch import nn
 from transformers import RobertaModel, AlbertModel
-
 
 no_value_assign_strategy = args['no_value_assign_strategy']
 
@@ -37,11 +36,11 @@ class KGENLU(nn.Module):
         """
         for domain_slot in domain_slot_type_map:
             # none, dont care, inform, referred, hit
-            self.gate[domain_slot] = nn.Linear(self.embedding_dim, 5).to(DEVICE)
+            self.gate[domain_slot] = nn.Linear(self.embedding_dim, 5)
             if no_value_assign_strategy == 'miss':
-                self.referred_parameter[domain_slot] = nn.Linear(self.embedding_dim, 30).to(DEVICE)
+                self.referred_parameter[domain_slot] = nn.Linear(self.embedding_dim, 30)
             else:
-                self.referred_parameter[domain_slot] = nn.Linear(self.embedding_dim, 31).to(DEVICE)
+                self.referred_parameter[domain_slot] = nn.Linear(self.embedding_dim, 31)
             if domain_slot_type_map[domain_slot] == 'classify':
                 if no_value_assign_strategy == 'miss':
                     num_value = len(self.classify_slot_value_index_dict[domain_slot])
@@ -49,10 +48,10 @@ class KGENLU(nn.Module):
                     # if not hit, the target index is len(classify_slot_value_index_dict[domain_slot]) rather
                     # than -1
                     num_value = len(self.classify_slot_value_index_dict[domain_slot]) + 1
-                self.slot_parameter[domain_slot] = nn.Linear(self.embedding_dim, num_value).to(DEVICE)
+                self.slot_parameter[domain_slot] = nn.Linear(self.embedding_dim, num_value)
             elif domain_slot_type_map[domain_slot] == 'span':
                 # probability of start index and end index
-                self.slot_parameter[domain_slot] = nn.Linear(self.embedding_dim, 2).to(DEVICE)
+                self.slot_parameter[domain_slot] = nn.Linear(self.embedding_dim, 2)
             else:
                 raise ValueError('Error Value')
 
@@ -60,17 +59,16 @@ class KGENLU(nn.Module):
         """
         context token id shape [batch size, sequence length]
         """
-        active_domain = data[1].to(DEVICE)
-        active_slot = data[2].to(DEVICE)
-        context_token = data[5].to(DEVICE)
-        context_mask = (1 - data[9].type(torch.uint8)).to(DEVICE)
-
+        active_domain = data[1]
+        active_slot = data[2]
+        context_token = data[5]
+        context_mask = (1 - data[9].type(torch.uint8))
         # predict
         referred_dict, hit_type_dict, hit_value_dict = {}, {}, {}
         for domain_slot in domain_slot_list:
-            referred_dict[domain_slot] = data[6][domain_slot].to(DEVICE)
-            hit_type_dict[domain_slot] = data[7][domain_slot].to(DEVICE)
-            hit_value_dict[domain_slot] = data[8][domain_slot].to(DEVICE)
+            referred_dict[domain_slot] = data[6][domain_slot]
+            hit_type_dict[domain_slot] = data[7][domain_slot]
+            hit_value_dict[domain_slot] = data[8][domain_slot]
 
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_gate, predict_dict, referred_dict = {}, {}, {}
@@ -88,7 +86,7 @@ class KGENLU(nn.Module):
     @staticmethod
     def create_mask(inputs):
         sequence_length = inputs.shape[0]
-        input_mask = torch.zeros((sequence_length, sequence_length), device=DEVICE).type(torch.bool)
+        input_mask = torch.zeros((sequence_length, sequence_length)).type(torch.bool)
         input_padding_mask = inputs == PAD_token
         return input_mask, input_padding_mask
 
@@ -98,9 +96,9 @@ class PretrainedEncoder(nn.Module):
         super(PretrainedEncoder, self).__init__()
         self._model_name = pretrained_model_name
         if pretrained_model_name == 'roberta':
-            self.model = RobertaModel.from_pretrained('roberta-base').to(DEVICE)
+            self.model = RobertaModel.from_pretrained('roberta-base')
         elif pretrained_model_name == 'albert':
-            self.model = AlbertModel.from_pretrained('albert-base-v2').to(DEVICE)
+            self.model = AlbertModel.from_pretrained('albert-base-v2')
         else:
             ValueError('Invalid Pretrained Model')
 

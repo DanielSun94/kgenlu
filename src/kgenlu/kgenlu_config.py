@@ -27,7 +27,9 @@ if config_name == 'roberta':
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
         'name': 'kgenlu-roberta',
-        'use_history': False,
+        'use_history_utterance': True,
+        'use_history_label': False,
+        'use_multi_gpu': True,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0
     }
@@ -40,18 +42,22 @@ NONE_IDX, DONTCARE_INDEX, HIT_INDEX = 0, 1, 2
 
 parser = argparse.ArgumentParser(description='Knowledge Graph Enhanced NLU (KGENLU)')
 parser.add_argument('--train_domain', help='training domain', default=config['train_domain'], required=False)
+parser.add_argument('--multi_gpu', help='use_multi_gpu', default=config['use_multi_gpu'], required=False)
 parser.add_argument('--train_data_fraction', help='data portion', default=config['train_data_fraction'], required=False)
 parser.add_argument('--epoch', help='training epoch', default=config['epoch'], required=False)
 parser.add_argument('--learning_rate', help='learning_rate', default=config['learning_rate'], required=False)
 parser.add_argument('--encoder_d_model', help='encoder_d_model', default=config['encoder_d_model'], required=False)
 parser.add_argument('--batch_size', help='training domain', default=config['batch_size'], required=False)
 parser.add_argument('--pretrained_model', help='pretrained_model', default=config['pretrained_model'], required=False)
+parser.add_argument('--local_rank', default=-1, type=int)
 parser.add_argument('--test_domain', help='test domain', default=config['test_domain'], required=False)
 parser.add_argument('--name', help='name', default=config['name'], required=False)
 parser.add_argument('--max_grad_norm', help='max_grad_norm', default=config['max_grad_norm'], required=False)
 parser.add_argument('--no_value_assign_strategy', help='test domain',
                     default=config['no_value_assign_strategy'], required=False)
-parser.add_argument('--use_history', help='use history utterance', default=config['use_history'], required=False)
+parser.add_argument('--use_history_label', help='history_label', default=config['use_history_label'], required=False)
+parser.add_argument('--use_history_utterance', help='use_history_utterance', default=config['use_history_utterance'],
+                    required=False)
 parser.add_argument('--max_len', help='test domain', default=config['max_length'], required=False)
 parser.add_argument('--auxiliary_domain_assign', help='auxiliary_domain_assign',
                     default=config['auxiliary_domain_assign'], required=False)

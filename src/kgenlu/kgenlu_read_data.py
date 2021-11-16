@@ -11,6 +11,7 @@ import random
 from kgenlu_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
     label_normalize_path, dialogue_data_cache_path, dialogue_data_path, SEP_token, CLS_token, DOMAIN_IDX_DICT, \
     SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, PAD_token, classify_slot_value_index_map_path
+from torch.utils.data.distributed import DistributedSampler
 from transformers import RobertaTokenizer
 
 # state matching的部分是否能够都对上，什么_booking之类的
@@ -27,7 +28,9 @@ domain_slot_type_map = NORMALIZE_MAP['slots-type']
 label_normalize_map = NORMALIZE_MAP['label_maps']
 train_domain = args['train_domain']
 test_domain = args['test_domain']
-use_history = args['use_history']
+use_history_label = args['use_history_label']
+use_history_utterance = args['use_history_utterance']
+use_multiple_gpu = args['multi_gpu']
 data_fraction = args['train_data_fraction']
 no_value_assign_strategy = args['no_value_assign_strategy']
 max_len = args['max_len']
@@ -113,11 +116,12 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
     if data_type == 'train':
         assert 0.01 <= float(data_fraction) <= 1
         dataset = SampleDataset(*dataset.get_fraction_data(float(data_fraction)))
-        sampler = RandomSampler(dataset)
-        dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
+
+    if use_multiple_gpu:
+        sampler = DistributedSampler(dataset)
     else:
         sampler = RandomSampler(dataset)
-        dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
+    dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
     return dataloader
 
 
@@ -344,7 +348,11 @@ def irrelevant_domain_label_mask(turn_state, interest_domain):
 
 def joint_alignment_and_truncate(turn_history_utterance_token, turn_history_utterance_token_map_list,
                                  turn_utterance_token, turn_utterance_token_map_list, turn_state, max_input_length):
-    context = turn_utterance_token + [0] + turn_history_utterance_token
+    if use_history_utterance:
+        context = turn_utterance_token + [0] + turn_history_utterance_token
+    else:
+        context = turn_utterance_token
+
     context_label_dict = {}
     for domain_slot in domain_slot_list:
         token_label = turn_state[domain_slot]['token_label']
@@ -357,11 +365,15 @@ def joint_alignment_and_truncate(turn_history_utterance_token, turn_history_utte
             aligned_turn_label.append(token_label[origin_index])
         for origin_index in turn_history_utterance_token_map_list:
             aligned_history_label.append(history_token_label[origin_index])
-        if not use_history:
+        if not use_history_label:
             aligned_history_label = [0 for _ in aligned_history_label]
-        context_label_dict[domain_slot] = aligned_turn_label + [0] + aligned_history_label
+        if use_history_utterance:
+            context_label_dict[domain_slot] = aligned_turn_label + [0] + aligned_history_label
+        else:
+            context_label_dict[domain_slot] = aligned_turn_label
 
     if len(context) > max_input_length:
+        # print('context too long')
         context = context[: max_input_length]
         for domain_slot in domain_slot_list:
             context_label_dict[domain_slot] = context_label_dict[domain_slot][: max_input_length]

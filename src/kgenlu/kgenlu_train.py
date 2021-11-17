@@ -175,7 +175,7 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
             result_list.append(batch_eval(dev_batch_predict_label_dict, batch))
         if use_multi_gpu:
             pickle.dump(result_list, open(medium_result_template.format(
-                data_type, PROCESS_GLOBAL_NAME, epoch, local_rank), 'rb'))
+                data_type, PROCESS_GLOBAL_NAME, epoch, local_rank), 'wb'))
             torch.distributed.barrier()
             result_list = load_result_multi_gpu(data_type, epoch)
             result_print(comprehensive_eval(result_list, epoch, PROCESS_GLOBAL_NAME, data_type))

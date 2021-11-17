@@ -21,7 +21,7 @@ if config_name == 'roberta':
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta',
         'max_length': 512,
-        'batch_size': 24,
+        'batch_size': 32,
         'epoch': 30,
         'train_data_fraction': 1,
         'encoder_d_model': 768,

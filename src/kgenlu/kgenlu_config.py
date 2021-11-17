@@ -2,8 +2,10 @@ import argparse
 import torch
 import os
 import logging
+from datetime import datetime
 
 # task and model setting
+load_cpkt_path = os.path.abspath('../../resource/model_checkpoint/check')
 config_name = 'roberta'
 # use history 和 no_value_assign_strategy旨在为以下的情况提供判断
 # 我们在判定token label 的start index和end index时，其实会出现一种情况，就是token label其实是在历史token里的
@@ -19,9 +21,9 @@ if config_name == 'roberta':
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta',
         'max_length': 512,
-        'batch_size': 32,
+        'batch_size': 24,
         'epoch': 30,
-        'train_data_fraction': 1.0,
+        'train_data_fraction': 1,
         'encoder_d_model': 768,
         'learning_rate': 0.00001,
         'device': 'cuda:1',
@@ -37,7 +39,6 @@ else:
     raise ValueError('Invalid Config Name')
 
 DEVICE = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
-
 NONE_IDX, DONTCARE_INDEX, HIT_INDEX = 0, 1, 2
 
 parser = argparse.ArgumentParser(description='Knowledge Graph Enhanced NLU (KGENLU)')
@@ -93,6 +94,9 @@ DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'be
 multiwoz_dataset_folder = os.path.abspath('../../resource/multiwoz')
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
 # dataset, time, epoch, general acc
+evaluation_folder = os.path.abspath('../../resource/evaluation')
+medium_result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}_{}_{}_{}.pkl')
+ckpt_template = os.path.join(os.path.abspath('../../resource/model_checkpoint'), '{}_{}.ckpt')
 result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}_{}_epoch_{}_{}.csv')
 # train_idx_path = os.path.join(multiwoz_dataset_folder, 'trainListFile.json')
 dialogue_data_path = os.path.join(multiwoz_dataset_folder, 'data.json')

@@ -1,8 +1,7 @@
 import torch
 import numpy as np
 import csv
-from datetime import datetime
-from kgenlu_config import args, result_template
+from kgenlu_config import args, result_template, evaluation_folder
 from kgenlu_read_data import domain_slot_type_map, tokenizer, domain_slot_list
 
 
@@ -31,13 +30,13 @@ def batch_eval(batch_predict_label_dict, train_batch):
     return result
 
 
-def comprehensive_eval(epoch_result, epoch, data_type):
+def comprehensive_eval(result_list, data_type, process_time, epoch):
     data_size = -1
     reorganized_result_dict, slot_result_dict, domain_result_dict = {}, {}, {},
     for domain_slot in domain_slot_list:
         reorganized_result_dict[domain_slot] = []
 
-    for batch_result in epoch_result:
+    for batch_result in result_list:
         for domain_slot in batch_result:
             reorganized_result_dict[domain_slot].append(batch_result[domain_slot])
     for domain_slot in domain_slot_list:
@@ -86,8 +85,8 @@ def comprehensive_eval(epoch_result, epoch, data_type):
     for line in result_rows:
         write_rows.append(line)
 
-    now = datetime.now().strftime("%m_%d_%Y_%H_%M_%S")
-    with open(result_template.format(data_type, now, epoch, general_acc), 'w', encoding='utf-8-sig', newline='') as f:
+    with open(result_template.format(data_type, process_time, epoch,
+                                     general_acc), 'w', encoding='utf-8-sig', newline='') as f:
         csv.writer(f).writerows(write_rows)
     return result_rows
 

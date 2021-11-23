@@ -23,7 +23,7 @@ def batch_eval(batch_predict_label_dict, train_batch):
                 confusion_mat[2, idx] = 1
             elif label != 'none' and predict == 'none':
                 confusion_mat[3, idx] = 1
-            elif label != 'none' and predict != 'none' and label_equal_test:
+            elif label != 'none' and predict != 'none' and not label_equal_test:
                 confusion_mat[4, idx] = 1
             else:
                 raise ValueError(' ')

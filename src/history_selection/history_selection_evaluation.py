@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 import csv
-from kgenlu_config import args, result_template, evaluation_folder
-from kgenlu_read_data import domain_slot_type_map, tokenizer, domain_slot_list, check_slot_inform
+from history_selection_config import args, result_template, evaluation_folder
+from history_selection_read_data import domain_slot_type_map, tokenizer, domain_slot_list
 
 
 def batch_eval(batch_predict_label_dict, train_batch):
@@ -10,12 +10,11 @@ def batch_eval(batch_predict_label_dict, train_batch):
     for domain_slot in domain_slot_list:
         confusion_mat = np.zeros([5, len(batch_predict_label_dict[domain_slot])])  # 4 for tp, tn, fp, fn, pfi
         predict_result = batch_predict_label_dict[domain_slot]
-        label_result = [item[domain_slot] if domain_slot in item else 'none' for item in train_batch[4]]
+        label_result = [item[domain_slot] if domain_slot in item else 'none' for item in train_batch[3]]
         assert len(label_result) == len(predict_result)
         for idx in range(len(predict_result)):
             predict, label = predict_result[idx], label_result[idx]
-            label_equal_test, _ = check_slot_inform(predict, label)
-            if label != 'none' and predict != 'none' and label_equal_test:
+            if label != 'none' and predict != 'none' and predict == label:
                 confusion_mat[0, idx] = 1
             elif label == 'none' and predict == 'none':
                 confusion_mat[1, idx] = 1
@@ -23,16 +22,12 @@ def batch_eval(batch_predict_label_dict, train_batch):
                 confusion_mat[2, idx] = 1
             elif label != 'none' and predict == 'none':
                 confusion_mat[3, idx] = 1
-            elif label != 'none' and predict != 'none' and label_equal_test:
+            elif label != 'none' and predict != 'none' and predict != label:
                 confusion_mat[4, idx] = 1
             else:
                 raise ValueError(' ')
         result[domain_slot] = confusion_mat
     return result
-
-
-def label_equal_test(predict, label):
-    pass
 
 
 def comprehensive_eval(result_list, data_type, process_name, epoch):
@@ -98,7 +93,8 @@ def comprehensive_eval(result_list, data_type, process_name, epoch):
 
 def reconstruct_batch_predict_label(domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
                                     predict_referral_one_slot, train_batch, classify_slot_index_value_dict):
-    batch_utterance, batch_last_turn_label, inform_value_label = train_batch[5], train_batch[10], train_batch[11]
+    batch_change_label = [item[domain_slot] if domain_slot in item else 'none' for item in train_batch[3]]
+    batch_utterance, batch_last_turn_label = train_batch[5], train_batch[10]
 
     hit_type_predict = torch.argmax(predict_hit_type_one_slot, dim=1).cpu().detach().numpy()
     referral_predict = torch.argmax(predict_referral_one_slot, dim=1).cpu().detach().numpy()
@@ -112,16 +108,16 @@ def reconstruct_batch_predict_label(domain_slot, predict_hit_type_one_slot, pred
         hit_value_predict = torch.cat((start_idx_predict, end_idx_predict), dim=1).cpu().detach().numpy()
 
     reconstructed_label = []
-    for item in zip(batch_utterance, batch_last_turn_label, hit_type_predict, referral_predict,
-                    hit_value_predict, inform_value_label):
-        utterance, last_turn_label, hit_type_predict_item, referral_predict_item, hit_value_predict_item, inform_value\
-            = item
+    for item in zip(batch_change_label, batch_utterance, batch_last_turn_label, hit_type_predict, referral_predict,
+                    hit_value_predict):
+        change_label, utterance, last_turn_label, hit_type_predict_item, referral_predict_item, \
+            hit_value_predict_item = item
         if hit_type_predict_item == 0:  # for
             reconstructed_label.append('none')
         elif hit_type_predict_item == 1:
             reconstructed_label.append('dontcare')
         elif hit_type_predict_item == 2:
-            reconstructed_label.append(inform_value[domain_slot])
+            reconstructed_label.append(last_turn_label[domain_slot])
         elif hit_type_predict_item == 3:
             if referral_predict_item == 30:
                 referral_predict_item = 'none'
@@ -137,13 +133,13 @@ def reconstruct_batch_predict_label(domain_slot, predict_hit_type_one_slot, pred
             else:
                 assert domain_slot_type_map[domain_slot] == 'span'
                 start_idx, end_idx = hit_value_predict_item
-                # TODO 继续校验
                 if start_idx <= end_idx:
                     target_utterance = utterance[start_idx: end_idx+1]
                     target_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(target_utterance))
                     reconstructed_label.append(target_value)
                 else:
                     reconstructed_label.append('none')
+
         else:
             raise ValueError('invalid value')
     return reconstructed_label

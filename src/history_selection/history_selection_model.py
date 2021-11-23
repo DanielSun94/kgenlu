@@ -1,6 +1,6 @@
 import torch
 from tqdm import tqdm
-from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
+from history_selection_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
 from kgenlu_config import args, logger, PAD_token
 from torch import nn
 from transformers import RobertaModel, AlbertModel
@@ -63,6 +63,12 @@ class KGENLU(nn.Module):
         active_slot = data[2]
         context_token = data[5]
         context_mask = (1 - data[9].type(torch.uint8))
+        # predict
+        referred_dict, hit_type_dict, hit_value_dict = {}, {}, {}
+        for domain_slot in domain_slot_list:
+            referred_dict[domain_slot] = data[6][domain_slot]
+            hit_type_dict[domain_slot] = data[7][domain_slot]
+            hit_value_dict[domain_slot] = data[8][domain_slot]
 
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_gate, predict_dict, referred_dict = {}, {}, {}
@@ -90,7 +96,7 @@ class PretrainedEncoder(nn.Module):
         super(PretrainedEncoder, self).__init__()
         self._model_name = pretrained_model_name
         if pretrained_model_name == 'roberta':
-            self.model = RobertaModel.from_pretrained('roberta-base')
+            self.model = RobertaModel.from_pretrained('roberta-large')
         elif pretrained_model_name == 'albert':
             self.model = AlbertModel.from_pretrained('albert-base-v2')
         else:

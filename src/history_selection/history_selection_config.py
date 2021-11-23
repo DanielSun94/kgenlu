@@ -21,17 +21,17 @@ if config_name == 'roberta':
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta',
         'max_length': 512,
-        'batch_size': 32,
+        'batch_size': 8,
         'epoch': 15,
         'train_data_fraction': 1,
-        'encoder_d_model': 768,
+        'encoder_d_model': 1024,
         'learning_rate': 0.00001,
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
         'name': 'kgenlu-roberta',
         'use_history_utterance': True,
         'use_history_label': False,
-        'delex_system_utterance': False,
+        'delex_system_utterance': True,
         'use_multi_gpu': False,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
@@ -102,7 +102,7 @@ logger.info("|------logger.info-----")
 # special token
 UNK_token, PAD_token, SEP_token, CLS_token = '<unk>', '<pad>', '</s>', '<s>'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
-UNNORMALIZED_ACTION_SLOT = {'none', 'ref', 'choice', 'addr', 'post', 'ticket', 'fee', 'id', 'phone', 'car', 'open'}
+
 
 # resource path
 multiwoz_dataset_folder = os.path.abspath('../../resource/multiwoz')
@@ -152,7 +152,7 @@ IDX_SLOT_DICT = {0: 'leaveat', 1: 'destination', 2: 'departure', 3: 'arriveby', 
 # to proper designations.
 ACT_SLOT_NAME_MAP_DICT = {'depart': 'departure', 'dest': 'destination', 'leave': 'leaveat', 'arrive': 'arriveby',
                           'price': 'pricerange'}
-
+UNNORMALIZED_ACTION_SLOT = {'none', 'ref', 'choice', 'addr', 'post', 'ticket', 'fee', 'id', 'phone', 'car'}
 ACT_MAP_DICT = {
     'taxi-depart': 'taxi-departure',
     'taxi-dest': 'taxi-destination',

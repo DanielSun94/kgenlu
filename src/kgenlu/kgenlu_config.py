@@ -2,10 +2,8 @@ import argparse
 import torch
 import os
 import logging
-from datetime import datetime
 
 # task and model setting
-load_cpkt_path = os.path.abspath('../../resource/model_checkpoint/check')
 config_name = 'roberta'
 # use history 和 no_value_assign_strategy旨在为以下的情况提供判断
 # 我们在判定token label 的start index和end index时，其实会出现一种情况，就是token label其实是在历史token里的
@@ -17,14 +15,17 @@ config_name = 'roberta'
 # （label挂-1, miss）
 if config_name == 'roberta':
     config = {
+        'load_cpkt_path': '',  # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1_9.ckpt'),  #  ''
+        'start_epoch': 0,  # = 0
+        'process_name': 'no2',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta',
         'max_length': 512,
-        'batch_size': 32,
-        'epoch': 15,
+        'batch_size': 8,
+        'epoch': 10,
         'train_data_fraction': 1,
-        'encoder_d_model': 768,
+        'encoder_d_model': 1024,
         'learning_rate': 0.00001,
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
@@ -39,6 +40,9 @@ if config_name == 'roberta':
         'span_weight': 0.4,
         'classify_weight': 0.2,
         'referral_weight': 0.2,
+        'overwrite_cache': True,
+        'use_variant': True,
+        'mode': 'evaluation'  # train
     }
 else:
     raise ValueError('Invalid Config Name')
@@ -47,6 +51,13 @@ DEVICE = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
 NONE_IDX, DONTCARE_INDEX, HIT_INDEX = 0, 1, 2
 
 parser = argparse.ArgumentParser(description='Knowledge Graph Enhanced NLU (KGENLU)')
+parser.add_argument('--load_cpkt_path', help='load_cpkt_path', default=config['load_cpkt_path'], required=False)
+parser.add_argument('--use_variant', help='use_variant', default=config['use_variant'],
+                    required=False)
+parser.add_argument('--mode', help='mode', default=config['mode'], required=False)
+parser.add_argument('--start_epoch', help='start_epoch', default=config['start_epoch'], required=False)
+parser.add_argument('--process_name', help='process_name', default=config['process_name'], required=False)
+parser.add_argument('--overwrite_cache', help='overwrite_cache', default=config['overwrite_cache'], required=False)
 parser.add_argument('--train_domain', help='training domain', default=config['train_domain'], required=False)
 parser.add_argument('--gate_weight', help='gate_weight', default=config['gate_weight'], required=False)
 parser.add_argument('--span_weight', help='span_weight', default=config['span_weight'], required=False)
@@ -119,7 +130,6 @@ test_idx_path = os.path.join(multiwoz_dataset_folder, 'testListFile.json')
 label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
 dialogue_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_cache_{}.pkl')
-# dialogue_unstructured_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_coarse_cache_{}.pkl')
 classify_slot_value_index_map_path = os.path.join(multiwoz_dataset_folder, 'classify_slot_value_index_map_path.pkl')
 
 

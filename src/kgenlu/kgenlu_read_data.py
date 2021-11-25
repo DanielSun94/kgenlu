@@ -1,25 +1,25 @@
 import os
 import pickle
 import json
-import re
-import numpy as np
 import torch
 import math
-from torch.utils.data import Dataset, DataLoader, RandomSampler
+import re
+from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampler
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import random
 from kgenlu_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
     label_normalize_path, dialogue_data_cache_path, dialogue_data_path, SEP_token, CLS_token, DOMAIN_IDX_DICT, \
     SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, PAD_token, classify_slot_value_index_map_path, UNNORMALIZED_ACTION_SLOT
-from torch.utils.data.distributed import DistributedSampler
 from transformers import RobertaTokenizer
 
 # state matching的部分是否能够都对上，什么_booking之类的
 # 其实这样子做标签会非常稀疏，但是因为Trippy也用了类似的做法，那我们也用类似的做法
 if args['pretrained_model'] == 'roberta':
-    tokenizer = RobertaTokenizer.from_pretrained('roberta-base')
+    tokenizer = RobertaTokenizer.from_pretrained('roberta-large')
 else:
     raise ValueError('')
+
 NORMALIZE_MAP = json.load(open(label_normalize_path, 'r'))
 domain_slot_list = NORMALIZE_MAP['slots']
 domain_index_map = NORMALIZE_MAP['domain_index']
@@ -35,6 +35,7 @@ data_fraction = args['train_data_fraction']
 no_value_assign_strategy = args['no_value_assign_strategy']
 max_len = args['max_len']
 delex_system_utterance = args['delex_system_utterance']
+variant_flag = args['use_variant']
 train_domain_set = set(train_domain.strip().split('$'))
 test_domain_set = set(test_domain.strip().split('$'))
 active_slot_count = dict()
@@ -56,12 +57,12 @@ def prepare_data(overwrite):
             get_classify_slot_index_map(idx_dict, dialogue_data, act_data)
         pickle.dump([classify_slot_value_index_dict, classify_slot_index_value_dict],
                     open(classify_slot_value_index_map_path, 'wb'))
-    data = [process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict,
-                         overwrite),
-            process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', classify_slot_value_index_dict,
-                         overwrite),
-            process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict,
-                         overwrite)]
+    dev_data = process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', classify_slot_value_index_dict, overwrite)
+    test_data = process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict,
+                             overwrite)
+    train_data = process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict,
+                              overwrite)
+    data = train_data, dev_data, test_data
     logger.info('data prepared')
     return data, classify_slot_value_index_dict, classify_slot_index_value_dict
 
@@ -104,10 +105,11 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
         state_hit_count(data_dict, data_type)
         if data_type == 'train' or 'dev':
             processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict,
-                                                    train_domain_set)
+                                                    train_domain_set, data_type)
         else:
             assert data_type == 'test'
-            processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict, test_domain_set)
+            processed_data = prepare_data_for_model(data_dict, max_len, classify_slot_value_index_dict, test_domain_set,
+                                                    data_type)
         logger.info('prepare process finished')
         logger.info('constructing dataloader')
         dataset = construct_dataloader(processed_data, data_type)
@@ -117,10 +119,13 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
         assert 0.01 <= float(data_fraction) <= 1
         dataset = SampleDataset(*dataset.get_fraction_data(float(data_fraction)))
 
-    if use_multiple_gpu:
+    if use_multiple_gpu and data_type == 'train':
         sampler = DistributedSampler(dataset)
     else:
-        sampler = RandomSampler(dataset)
+        if data_type == 'train':
+            sampler = RandomSampler(dataset)
+        else:
+            sampler = SequentialSampler(dataset)
     dataloader = DataLoader(dataset, sampler=sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
     return dataloader
 
@@ -324,7 +329,66 @@ def state_hit_count(data_dict, data_type):
     logger.info(label_dict)
 
 
-def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_index_dict, interest_domain):
+def span_case_label_recovery_check(context, context_label_dict, state_dict):
+    check_flag = True
+    for domain_slot in state_dict:
+        if domain_slot_type_map[domain_slot] == 'span':
+            true_label = state_dict[domain_slot].strip()
+            context_label = context_label_dict[domain_slot]
+            if 1 in context_label:
+                start_index = context_label.index(1)
+                if 0 in context_label[start_index:]:
+                    end_index = context_label[start_index:].index(0) + start_index
+                else:
+                    end_index = len(context_label)
+                label_context = context[start_index: end_index]
+                reconstruct_label = \
+                    tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(label_context)).strip()
+                if not approximate_equal_test(reconstruct_label, true_label, variant_flag):
+                    check_flag = False
+    return check_flag
+
+
+def approximate_equal_test(reconstruct_label, true_label, use_variant):
+    reconstruct_label, true_label = reconstruct_label.lower().strip(), true_label.lower().strip()
+    if reconstruct_label != true_label:
+        if reconstruct_label.replace(' ', '') != true_label.replace(' ', ''):
+            if use_variant:
+                equal = False
+                if reconstruct_label in label_normalize_map:
+                    for reconstruct_label_variant in label_normalize_map[reconstruct_label]:
+                        reconstruct_true_label = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(
+                            tokenizer.convert_tokens_to_ids(tokenizer.tokenize(' ' + true_label)))).strip()
+                        reconstruct_label_variant_ = tokenizer.convert_tokens_to_string(
+                            tokenizer.convert_ids_to_tokens(
+                                tokenizer.convert_tokens_to_ids(
+                                    tokenizer.tokenize(' ' + reconstruct_label_variant)))).strip()
+                        trimmed_reconstruct_label = reconstruct_label_variant_.replace(' ', '')
+                        trimmed_true_label = reconstruct_true_label.replace(' ', '')
+                        if reconstruct_label_variant_ == reconstruct_true_label or trimmed_true_label == \
+                                trimmed_reconstruct_label:
+                            equal = True
+                if true_label in label_normalize_map:
+                    for label_variant in label_normalize_map[true_label]:
+                        reconstruct_true_label_variant = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(
+                            tokenizer.convert_tokens_to_ids(tokenizer.tokenize(' ' + label_variant)))).strip()
+                        reconstruct_label_ = tokenizer.convert_tokens_to_string(
+                            tokenizer.convert_ids_to_tokens(
+                                tokenizer.convert_tokens_to_ids(
+                                    tokenizer.tokenize(' ' + reconstruct_label)))).strip()
+                        trimmed_reconstruct_label = reconstruct_label_.replace(' ', '')
+                        trimmed_true_label = reconstruct_true_label_variant.replace(' ', '')
+                        if reconstruct_label_ == reconstruct_true_label_variant or \
+                                trimmed_true_label == trimmed_reconstruct_label:
+                            equal = True
+                if not equal:
+                    return False
+            else:
+                return False
+    return True
+
+
+def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_index_dict, interest_domain, data_type):
     data_for_model = []
     for dialogue_idx in data_dict:
         dialogue = data_dict[dialogue_idx]
@@ -347,6 +411,8 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             turn_inform_value = turn_data['inform_value']
             last_turn_label = turn_data['last_turn_label']
 
+            assert span_case_label_recovery_check(context, context_label_dict, turn_data['turn_change_state'])
+
             data_for_model.append(
                 Sample(sample_id=dialogue_idx+'-'+str(turn_idx),
                        active_domain=turn_active_domains,
@@ -359,6 +425,13 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
                        context_mask=context_mask,
                        inform_value=turn_inform_value)
             )
+    # count type
+    hit_type_count_list = [0, 0, 0, 0, 0]
+    for item in data_for_model:
+        for domain_slot in domain_slot_list:
+            hit_type = item.hit_type[domain_slot]
+            hit_type_count_list[hit_type] += 1
+    logger.info('{}, hit_type_count_list: {}'.format(data_type, hit_type_count_list))
     return data_for_model
 
 
@@ -460,6 +533,7 @@ def utterance_tokenize(utterance_token):
 
 def state_structurize(state, context_label_dict, classify_slot_value_index_dict):
     # check
+    # 只有在hit时才会给value index置有效值，其余情况置空，因此前面置的-1之类的值不会产生不恰当的影响
     reorganized_state = {}
     for domain_slot in state:
         if domain_slot not in reorganized_state:
@@ -525,27 +599,6 @@ def span_idx_extract(context_label_dict, domain_slot, no_value_assign):
         else:
             end_idx = context_label_dict[domain_slot][start_idx:].index(0) + start_idx - 1
     return start_idx, end_idx
-
-
-# def get_span_index(turn_utterance_token_map_list, origin_utterance_label):
-#     # check
-#     assert len(origin_utterance_label) == turn_utterance_token_map_list[-1] + 1
-#     assert np.sum(np.array(origin_utterance_label)) > 0
-#     new_label = [0 for _ in turn_utterance_token_map_list]
-#     for index in range(len(turn_utterance_token_map_list)):
-#         origin_index = turn_utterance_token_map_list[index]
-#         if origin_utterance_label[origin_index] == 1:
-#             new_label[index] = 1
-#
-#     start_index, end_index = -1, -1
-#     for index in range(len(new_label)):
-#         if new_label[index] == 1:
-#             if start_index < 0:
-#                 start_index = index
-#             if index > end_index:
-#                 end_index = index
-#     assert start_index != -1 and end_index != -1
-#     return start_index, end_index
 
 
 def classify_slot_value_indexing(data_dict):
@@ -684,7 +737,7 @@ def get_turn_label(value_label, inform_label, current_turn_utterance_token, doma
         class_type = value_label
     else:
         in_utterance_flag, position, value_index = \
-            check_label(value_label, utterance_token_label, domain_slot, classify_slot_value_index_dict)
+            check_label(value_label, current_turn_utterance_token, domain_slot, classify_slot_value_index_dict)
         is_informed, informed_value = check_slot_inform(value_label, inform_label)
         referred_slot = check_slot_referral(value_label, domain_slot, seen_slots)
 
@@ -725,14 +778,9 @@ def check_slot_referral(value_label, slot, seen_slots):
         if re.match("(hotel|restaurant)-book-people", slot) and s == 'hotel-book-stay':
             continue
         if slot != s and (slot not in seen_slots or seen_slots[slot] != value_label):
-            if seen_slots[s] == value_label:
+            if approximate_equal_test(seen_slots[s], value_label, variant_flag):
                 referred_slot = s
                 break
-            elif value_label in label_normalize_map:
-                for value_label_variant in label_normalize_map[value_label]:
-                    if seen_slots[s] == value_label_variant:
-                        referred_slot = s
-                        break
     return referred_slot
 
 
@@ -745,9 +793,8 @@ def check_label(value_label, user_utterance_token, domain_slot, classify_slot_va
         assert domain_slot_type_map[domain_slot] == 'span'
         in_user_utterance_flag, position = get_token_position(user_utterance_token, value_label)
         # If no hit even though there should be one, check for value label variants
-        if not in_user_utterance_flag and value_label in label_normalize_map:
+        if (not in_user_utterance_flag) and value_label in label_normalize_map and variant_flag:
             for value_label_variant in label_normalize_map[value_label]:
-                # 使用了极为复杂的语义判定策略，从而进行判定
                 in_user_utterance_flag, position = get_token_position(user_utterance_token, value_label_variant)
                 if in_user_utterance_flag:
                     break
@@ -775,51 +822,25 @@ def check_slot_inform(value_label, inform_label):
     result = False
     informed_value = 'none'
     value_label = ' '.join(tokenize(value_label))
-    if value_label == inform_label:
+    if approximate_equal_test(inform_label, value_label, variant_flag):
         result = True
-    elif is_in_list(inform_label, value_label):
-        result = True
-    elif is_in_list(value_label, inform_label):
-        result = True
-    elif inform_label in label_normalize_map:
-        for inform_label_variant in label_normalize_map[inform_label]:
-            if value_label == inform_label_variant:
-                result = True
-                break
-            elif is_in_list(inform_label_variant, value_label):
-                result = True
-                break
-            elif is_in_list(value_label, inform_label_variant):
-                result = True
-                break
-    elif value_label in label_normalize_map:
-        for value_label_variant in label_normalize_map[value_label]:
-            if value_label_variant == inform_label:
-                result = True
-                break
-            elif is_in_list(inform_label, value_label_variant):
-                result = True
-                break
-            elif is_in_list(value_label_variant, inform_label):
-                result = True
-                break
     if result:
         informed_value = inform_label
     return result, informed_value
 
-
-def is_in_list(token, value):
-    # check
-    found = False
-    token_list = [item for item in map(str.strip, re.split("(\W+)", token)) if len(item) > 0]
-    value_list = [item for item in map(str.strip, re.split("(\W+)", value)) if len(item) > 0]
-    token_len = len(token_list)
-    value_len = len(value_list)
-    for i in range(token_len + 1 - value_len):  # if the value len is larger than token len, the loop will be skipped
-        if token_list[i:i + value_len] == value_list:
-            found = True
-            break
-    return found
+#
+# def is_in_list(token, value):
+#     # check
+#     found = False
+#     token_list = [item for item in map(str.strip, re.split("(\W+)", token)) if len(item) > 0]
+#     value_list = [item for item in map(str.strip, re.split("(\W+)", value)) if len(item) > 0]
+#     token_len = len(token_list)
+#     value_len = len(value_list)
+#     for i in range(token_len + 1 - value_len):  # if the value len is larger than token len, the loop will be skipped
+#         if token_list[i:i + value_len] == value_list:
+#             found = True
+#             break
+#     return found
 
 
 def delex_text(utterance, values, unk_token=UNK_token):
@@ -1212,7 +1233,6 @@ def main():
         batch_count += 1
     print(batch_count)
     logger.info('data read success')
-
     print(unpointable_slot_value_set)
 
 

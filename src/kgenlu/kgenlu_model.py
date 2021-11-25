@@ -63,7 +63,6 @@ class KGENLU(nn.Module):
         active_slot = data[2]
         context_token = data[5]
         context_mask = (1 - data[9].type(torch.uint8))
-
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_gate, predict_dict, referred_dict = {}, {}, {}
         # Choose the output of the first token ([CLS]) to predict gate and classification)
@@ -77,20 +76,13 @@ class KGENLU(nn.Module):
                 predict_dict[domain_slot] = weight(encode)
         return predict_gate, predict_dict, referred_dict
 
-    @staticmethod
-    def create_mask(inputs):
-        sequence_length = inputs.shape[0]
-        input_mask = torch.zeros((sequence_length, sequence_length)).type(torch.bool)
-        input_padding_mask = inputs == PAD_token
-        return input_mask, input_padding_mask
-
 
 class PretrainedEncoder(nn.Module):
     def __init__(self, pretrained_model_name):
         super(PretrainedEncoder, self).__init__()
         self._model_name = pretrained_model_name
         if pretrained_model_name == 'roberta':
-            self.model = RobertaModel.from_pretrained('roberta-base')
+            self.model = RobertaModel.from_pretrained('roberta-large')
         elif pretrained_model_name == 'albert':
             self.model = AlbertModel.from_pretrained('albert-base-v2')
         else:

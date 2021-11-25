@@ -7,19 +7,24 @@ from kgenlu_config import args, logger, DEVICE, medium_result_template, evaluati
 import pickle
 import torch.multiprocessing as mp
 from torch import nn, optim
+import numpy as np
 from tqdm import tqdm
-from kgenlu_evaluation import reconstruct_batch_predict_label, batch_eval, comprehensive_eval
+from collections import OrderedDict
+from kgenlu_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval, \
+    predict_label_reconstruct
 import torch.distributed as dist
 from transformers import get_linear_schedule_with_warmup, AdamW
 
-PROCESS_GLOBAL_NAME = 'no4'
+PROCESS_GLOBAL_NAME = args['process_name']
 use_multi_gpu = args['multi_gpu']
-load_cpkt_name = ''  # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1_0.ckpt')
-start_epoch = 0
-overwrite = False
+overwrite = args['overwrite_cache']
+start_epoch = args['start_epoch']
+load_cpkt_path = args['load_cpkt_path']
+mode = args['mode']
 
 
-def train(model, train_loader, dev_loader, test_loader, classify_slot_index_value_dict, local_rank=None):
+def train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
+          classify_slot_value_index_dict, local_rank=None):
     max_step = len(train_loader) * args['epoch']
     num_warmup_steps = int(len(train_loader) * args['epoch'] * args['warmup_proportion'])
     no_decay = ['bias', 'LayerNorm.weight']
@@ -32,7 +37,7 @@ def train(model, train_loader, dev_loader, test_loader, classify_slot_index_valu
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
                                                 num_training_steps=max_step)
     global_step = 0
-
+    ckpt_path = None
     for epoch in range(args['epoch']):
         logger.info("Epoch :{}".format(epoch))
         if use_multi_gpu:
@@ -40,49 +45,64 @@ def train(model, train_loader, dev_loader, test_loader, classify_slot_index_valu
 
         epoch_result = []
         # Run the train function
-        model.train()
-        full_loss = 0
-        for train_batch in tqdm(train_loader):
-            global_step += 1
-            if global_step < start_epoch * len(train_loader):
+        if mode == 'train':
+            model.train()
+            full_loss = 0
+            for train_batch in tqdm(train_loader):
+                global_step += 1
+                if global_step < start_epoch * len(train_loader):
+                    scheduler.step()
+                    continue
+
+                if not use_multi_gpu:
+                    train_batch = data_device_alignment(train_batch)
+                predict_gate, predict_dict, referred_dict = model(train_batch)
+                loss, train_batch_predict_label_dict = \
+                    compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch,
+                                                classify_slot_index_value_dict, local_rank)
+                optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
+                optimizer.step()
                 scheduler.step()
-                continue
+                full_loss += loss.detach().item()
+                epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch, 'single'))
+                del loss, predict_gate, predict_dict, referred_dict, train_batch  # for possible CUDA out of memory
+            logger.info('average loss of epoch: {}: {}'.format(epoch, full_loss / len(train_loader)))
 
-            if not use_multi_gpu:
-                train_batch = data_device_alignment(train_batch)
-            predict_gate, predict_dict, referred_dict = model(train_batch)
-            loss, train_batch_predict_label_dict = \
-                compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch,
-                                            classify_slot_index_value_dict, local_rank)
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
-            optimizer.step()
-            scheduler.step()
-            full_loss += loss.detach().item()
-            epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch))
-            del loss, predict_gate, predict_dict, referred_dict, train_batch  # for possible CUDA out of memory
+            if use_multi_gpu:
+                pickle.dump(epoch_result,
+                            open(medium_result_template.format('train', PROCESS_GLOBAL_NAME, epoch, local_rank), 'wb'))
+                torch.distributed.barrier()
+                if local_rank == 0:
+                    result_list = load_result_multi_gpu('train', epoch)
+                    result_print(comprehensive_eval(result_list, 'train', PROCESS_GLOBAL_NAME, epoch))
+                torch.distributed.barrier()
+            else:
+                result_print(comprehensive_eval(epoch_result, 'train', PROCESS_GLOBAL_NAME, epoch))
 
+            #  save model
+            ckpt_path = ckpt_template.format(PROCESS_GLOBAL_NAME, epoch)
+            save_model(use_multi_gpu, model, ckpt_path, local_rank)
+
+        # validation and test，此处因为原始数据判定的顺序问题，不可以使用distributed model，因此要重新载入
+        if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
+            if mode != 'train':
+                assert ckpt_path is None and load_cpkt_path is not None
+                eval_model = KGENLU(name, args['pretrained_model'], classify_slot_value_index_dict)
+                eval_model = eval_model.cuda(DEVICE)
+                load_model(multi_gpu=False, model=eval_model, ckpt_path=load_cpkt_path)
+            else:
+                assert ckpt_path is not None
+                eval_model = KGENLU(name, args['pretrained_model'], classify_slot_value_index_dict)
+                eval_model = eval_model.cuda(DEVICE)
+                load_model(multi_gpu=False, model=eval_model, ckpt_path=ckpt_path)
+            logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
+            model_eval(eval_model, dev_loader, 'dev', epoch, classify_slot_index_value_dict, local_rank)
+            logger.info('start evaluation in test dataset, epoch: {}'.format(epoch))
+            model_eval(eval_model, test_loader, 'test', epoch, classify_slot_index_value_dict, local_rank)
         if use_multi_gpu:
-            pickle.dump(epoch_result,
-                        open(medium_result_template.format('train', PROCESS_GLOBAL_NAME, epoch, local_rank), 'wb'))
             torch.distributed.barrier()
-            if local_rank == 0:
-                result_list = load_result_multi_gpu('train', epoch)
-                result_print(comprehensive_eval(result_list, 'train', PROCESS_GLOBAL_NAME,  epoch))
-            torch.distributed.barrier()
-        else:
-            result_print(comprehensive_eval(epoch_result, 'train', PROCESS_GLOBAL_NAME, epoch))
-
-        #  save model
-        ckpt_path = ckpt_template.format(PROCESS_GLOBAL_NAME, epoch)
-        save_model(use_multi_gpu, model, ckpt_path, local_rank)
-
-        # validation and test
-        logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
-        model_eval(model, dev_loader, 'dev', epoch, classify_slot_index_value_dict, local_rank)
-        logger.info('start evaluation in test dataset, epoch: {}'.format(epoch))
-        model_eval(model, test_loader, 'test', epoch, classify_slot_index_value_dict, local_rank)
 
 
 def save_model(multi_gpu, model, ckpt_path, local_rank=None):
@@ -98,11 +118,23 @@ def save_model(multi_gpu, model, ckpt_path, local_rank=None):
 def load_model(multi_gpu, model, ckpt_path, local_rank=None):
     if multi_gpu:
         map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
-        model.load_state_dict(
-            torch.load(ckpt_path, map_location=map_location))
+        state_dict = torch.load(ckpt_path, map_location=map_location)
+        new_state_dict = OrderedDict()
+        for key in state_dict:
+            if 'module.' in key:
+                new_state_dict[key] = state_dict[key]
+            else:
+                new_state_dict['module.'+key] = state_dict[key]
+        model.load_state_dict(state_dict)
     else:
-        model.load_state_dict(
-            torch.load(ckpt_path))
+        state_dict = torch.load(ckpt_path, map_location=torch.device(DEVICE))
+        new_state_dict = OrderedDict()
+        for key in state_dict:
+            if 'module.' in key:
+                new_state_dict[key.replace('module.', '')] = state_dict[key]
+            else:
+                new_state_dict[key] = state_dict[key]
+        model.load_state_dict(new_state_dict)
     logger.info('load model success')
 
 
@@ -121,7 +153,7 @@ def data_device_alignment(batch):
 
 def result_print(comprehensive_result):
     for line in comprehensive_result:
-        print(line)
+        logger.info(line)
 
 
 def compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch, classify_slot_index_value_dict,
@@ -152,7 +184,7 @@ def compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train
             label_referral_one_slot = train_batch[6][domain_slot].to(local_rank)
 
         batch_predict_label_dict[domain_slot] = \
-            reconstruct_batch_predict_label(domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
+            reconstruct_batch_predict_label_train(domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
                                             predict_referral_one_slot, train_batch,
                                             classify_slot_index_value_dict)
 
@@ -187,25 +219,67 @@ def load_result_multi_gpu(data_type, epoch):
 def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_dict, local_rank=None):
     model.eval()
     result_list = []
+    last_batch_latest_state, last_sample_id = {domain_slot: 'none' for domain_slot in domain_slot_list}, ''
     with torch.no_grad():
-        for batch in tqdm(data_loader):
-            if not use_multi_gpu:
-                batch = data_device_alignment(batch)
-            predict_gate, predict_dict, referred_dict = model(batch)
-            _, dev_batch_predict_label_dict = \
-                compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, batch,
-                                            classify_slot_index_value_dict, local_rank)
-            result_list.append(batch_eval(dev_batch_predict_label_dict, batch))
-        if use_multi_gpu:
-            pickle.dump(result_list, open(medium_result_template.format(
-                data_type, PROCESS_GLOBAL_NAME, epoch, local_rank), 'wb'))
-            torch.distributed.barrier()
-            if local_rank == 0:
-                result_list = load_result_multi_gpu(data_type, epoch)
-                result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
-        else:
+        if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
+            for batch in tqdm(data_loader):
+                if not use_multi_gpu:
+                    batch = data_device_alignment(batch)
+
+                predict_gate, predict_dict, referred_dict = model(batch)
+                batch_predict_label_dict, last_sample_id, last_batch_latest_state = \
+                    evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
+                                               classify_slot_index_value_dict, last_batch_latest_state, last_sample_id)
+                result_list.append(batch_eval(batch_predict_label_dict, batch, 'cumulative'))
             result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
+    if use_multi_gpu:
+        torch.distributed.barrier()
     logger.info('model eval, data: {}, epoch: {} finished'.format(data_type, epoch))
+
+
+def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch, classify_slot_index_value_dict,
+                               last_batch_latest_state, last_sample_id):
+    batch_predict_label_dict = {}
+    for domain_slot in domain_slot_list:
+        batch_predict_label_dict[domain_slot] = []
+        predict_gate[domain_slot] = predict_gate[domain_slot].cpu().detach().numpy()
+        predict_dict[domain_slot] = predict_dict[domain_slot].cpu().detach().numpy()
+        referred_dict[domain_slot] = referred_dict[domain_slot].cpu().detach().numpy()
+
+    for index in range(len(batch[0])):
+        current_sample_id = batch[0][index].lower().split('.json')[0].strip()
+        if current_sample_id != last_sample_id:
+            last_sample_id = current_sample_id
+            last_batch_latest_state = {domain_slot: 'none' for domain_slot in domain_slot_list}
+
+        current_turn_state = last_batch_latest_state.copy()
+        for domain_slot in domain_slot_list:
+            utterance, inform_value_label = batch[5][index], batch[11][index]
+
+            predict_hit_type_one_slot = predict_gate[domain_slot][index]
+            predict_value_one_slot = predict_dict[domain_slot][index]
+            predict_referral_one_slot = referred_dict[domain_slot][index]
+
+            hit_type_predict = int(np.argmax(predict_hit_type_one_slot))
+            referral_predict = int(np.argmax(predict_referral_one_slot))
+
+            if domain_slot_type_map[domain_slot] == 'classify':
+                hit_value_predict = int(np.argmax(predict_value_one_slot))
+            else:
+                assert domain_slot_type_map[domain_slot] == 'span'
+                start_idx_predict = int(np.argmax(predict_value_one_slot[:, 0]))
+                end_idx_predict = int(np.argmax(predict_value_one_slot[:, 1]))
+                hit_value_predict = [start_idx_predict, end_idx_predict]
+
+            predicted_value = predict_label_reconstruct(
+                hit_type_predict, inform_value_label, domain_slot, referral_predict, last_batch_latest_state,
+                hit_value_predict, classify_slot_index_value_dict, utterance)
+            if predicted_value == 'none':
+                predicted_value = last_batch_latest_state[domain_slot]
+            current_turn_state[domain_slot] = predicted_value
+            batch_predict_label_dict[domain_slot].append(predicted_value)
+        last_batch_latest_state = current_turn_state.copy()
+    return batch_predict_label_dict, last_sample_id, last_batch_latest_state
 
 
 def main():
@@ -226,9 +300,10 @@ def single_gpu_main(pass_info):
     name, pretrained_model = pass_info
     model = KGENLU(name, pretrained_model, classify_slot_value_index_dict)
     model = model.cuda(DEVICE)
-    if os.path.exists(load_cpkt_name):
-        load_model(use_multi_gpu, model, load_cpkt_name)
-    train(model, train_loader, dev_loader, test_loader, classify_slot_index_value_dict)
+    if os.path.exists(load_cpkt_path):
+        load_model(use_multi_gpu, model, load_cpkt_path)
+    train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
+          classify_slot_value_index_dict)
 
 
 def multi_gpu_main(local_rank, _, pass_info):
@@ -248,15 +323,16 @@ def multi_gpu_main(local_rank, _, pass_info):
 
     model = KGENLU(name, pretrained_model, classify_slot_value_index_dict)
     model = model.cuda(local_rank)  # 将模型拷贝到每个gpu上
-
-    if os.path.exists(load_cpkt_name):
-        load_model(use_multi_gpu, model, load_cpkt_name, local_rank)
-
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],
                                                       output_device=local_rank,
                                                       find_unused_parameters=True)
-    train(model, train_loader, dev_loader, test_loader, classify_slot_index_value_dict, local_rank)
+
+    if os.path.exists(load_cpkt_path):
+        load_model(use_multi_gpu, model, load_cpkt_path, local_rank)
+
+    train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
+          classify_slot_value_index_dict, local_rank)
 
 
 if __name__ == '__main__':

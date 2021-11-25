@@ -81,8 +81,8 @@ class PretrainedEncoder(nn.Module):
     def __init__(self, pretrained_model_name):
         super(PretrainedEncoder, self).__init__()
         self._model_name = pretrained_model_name
-        if pretrained_model_name == 'roberta':
-            self.model = RobertaModel.from_pretrained('roberta-large')
+        if 'roberta' in pretrained_model_name:
+            self.model = RobertaModel.from_pretrained(pretrained_model_name)
         elif pretrained_model_name == 'albert':
             self.model = AlbertModel.from_pretrained('albert-base-v2')
         else:

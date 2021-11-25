@@ -15,8 +15,8 @@ from transformers import RobertaTokenizer
 
 # state matching的部分是否能够都对上，什么_booking之类的
 # 其实这样子做标签会非常稀疏，但是因为Trippy也用了类似的做法，那我们也用类似的做法
-if args['pretrained_model'] == 'roberta':
-    tokenizer = RobertaTokenizer.from_pretrained('roberta-large')
+if 'roberta' in args['pretrained_model']:
+    tokenizer = RobertaTokenizer.from_pretrained(args['pretrained_model'])
 else:
     raise ValueError('')
 
@@ -329,7 +329,8 @@ def state_hit_count(data_dict, data_type):
     logger.info(label_dict)
 
 
-def span_case_label_recovery_check(context, context_label_dict, state_dict):
+def span_case_label_recovery_check(context, context_label_dict, state_dict,
+                                   dialogue_idx, turn_idx, turn_utterance_token, turn_history_utterance_token):
     check_flag = True
     for domain_slot in state_dict:
         if domain_slot_type_map[domain_slot] == 'span':
@@ -346,6 +347,14 @@ def span_case_label_recovery_check(context, context_label_dict, state_dict):
                     tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(label_context)).strip()
                 if not approximate_equal_test(reconstruct_label, true_label, variant_flag):
                     check_flag = False
+                    print('reconstruct failed, '
+                          'reconstruct_label: {}, true_label: {}'.format(reconstruct_label, true_label))
+                    print(dialogue_idx)
+                    print(turn_idx)
+                    print(domain_slot)
+                    print(turn_utterance_token)
+                    print(turn_history_utterance_token)
+                    print(turn_history_utterance_token)
     return check_flag
 
 
@@ -411,7 +420,8 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             turn_inform_value = turn_data['inform_value']
             last_turn_label = turn_data['last_turn_label']
 
-            assert span_case_label_recovery_check(context, context_label_dict, turn_data['turn_change_state'])
+            assert span_case_label_recovery_check(context, context_label_dict, turn_data['turn_cumulative_labels'],
+                                                  dialogue_idx, turn_idx, turn_utterance_token, turn_history_utterance_token)
 
             data_for_model.append(
                 Sample(sample_id=dialogue_idx+'-'+str(turn_idx),
@@ -680,14 +690,12 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
         reorganize_data[turn_idx]['history_utterance_token'] = [CLS_token] + history_token
         reorganize_data[turn_idx]['state'] = {}
         reorganize_data[turn_idx]['inform_value'] = {}
+        reorganize_data[turn_idx]['turn_change_state'] = modified_slots.copy()
+        reorganize_data[turn_idx]['turn_cumulative_labels'] = cumulative_labels.copy()
 
         for domain_slot in domain_slot_list:
             reorganize_data[turn_idx]['state'][domain_slot] = {}
-
-            value_label = 'none'
-            if domain_slot in modified_slots:
-                value_label = modified_slots[domain_slot]
-
+            value_label = cumulative_labels[domain_slot]
             inform_label = inform_info[domain_slot] if domain_slot in inform_info else 'none'
 
             inform_value, referred_slot, turn_utterance_token_label, class_type, classify_value = \
@@ -697,7 +705,15 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
             assert len(turn_utterance_token_label) == \
                    len(system_utterance_token) + len(user_utterance_token) + 1
 
+            # 此处需要注意一件事情，我们会根据value label置span的目标值。
+            # 而为了充分利用上下文信息，我们不能采取单轮信息预测的方式，而必须直接预测积累值。因此，我们需要识别历史turn中的index的情况
+            # 此处，只要当前的class type不为hit，说明class type的值是来源于其他信息，或者干脆就没有，此时需要重置history token label
+            # 只要为hit，哪怕有多重指代，也不会对正确性产生影响。
+            if class_type != 'hit':
+                history_token_label[domain_slot] = [0 for _ in range(len(history_token_label[domain_slot]))]
+
             if class_type == 'unpointable':
+                # 同样，unpointable也置空history label token, 这个是label本身的错误
                 class_type = 'none'
                 referred_slot = 'none'
             else:
@@ -711,13 +727,9 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
             reorganize_data[turn_idx]['inform_value'][domain_slot] = inform_value
             reorganize_data[turn_idx]['state'][domain_slot]['history_token_label'] = \
                 [0] + history_token_label[domain_slot]
-            reorganize_data[turn_idx]['turn_change_state'] = modified_slots
-            reorganize_data[turn_idx]['turn_cumulative_labels'] = cumulative_labels
 
             assert len(history_token_label[domain_slot]) == len(history_token)
-
-            history_token_label[domain_slot] = turn_utterance_token_label + [0] + \
-                history_token_label[domain_slot]
+            history_token_label[domain_slot] = turn_utterance_token_label + [0] + history_token_label[domain_slot]
 
         history = current_turn_utterance + ' ' + SEP_token + ' ' + history
         history_token = current_turn_utterance_token + [SEP_token] + history_token

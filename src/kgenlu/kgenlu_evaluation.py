@@ -116,7 +116,6 @@ def reconstruct_batch_predict_label_train(domain_slot, predict_hit_type_one_slot
         hit_value_predict = torch.cat((start_idx_predict, end_idx_predict), dim=1).cpu().detach().numpy()
 
     reconstructed_label_list = []
-    reconstructed_label = 'none'
     for item in zip(batch_utterance, batch_last_turn_label, hit_type_predict, referral_predict,
                     hit_value_predict, inform_value_label):
         utterance, last_turn_label, hit_type_predict, referral_predict_item, hit_value_predict_item, inform_value = item
@@ -124,7 +123,7 @@ def reconstruct_batch_predict_label_train(domain_slot, predict_hit_type_one_slot
             predict_label_reconstruct(hit_type_predict, inform_value, domain_slot, referral_predict_item,
                                       last_turn_label, hit_value_predict_item, classify_slot_index_value_dict,
                                       utterance))
-    return reconstructed_label
+    return reconstructed_label_list
 
 
 def predict_label_reconstruct(hit_type_predict_item, inform_value, domain_slot, referral_predict_item, last_turn_label,

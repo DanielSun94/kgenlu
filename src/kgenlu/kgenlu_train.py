@@ -66,7 +66,7 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
                 optimizer.step()
                 scheduler.step()
                 full_loss += loss.detach().item()
-                epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch, 'single'))
+                epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch, 'turn'))
                 del loss, predict_gate, predict_dict, referred_dict, train_batch  # for possible CUDA out of memory
             logger.info('average loss of epoch: {}: {}'.format(epoch, full_loss / len(train_loader)))
 
@@ -219,7 +219,7 @@ def load_result_multi_gpu(data_type, epoch):
 def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_dict, local_rank=None):
     model.eval()
     result_list = []
-    last_batch_latest_state, last_sample_id = {domain_slot: 'none' for domain_slot in domain_slot_list}, ''
+    latest_state, last_sample_id = {domain_slot: 'none' for domain_slot in domain_slot_list}, ''
     with torch.no_grad():
         if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
             for batch in tqdm(data_loader):
@@ -227,9 +227,9 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
                     batch = data_device_alignment(batch)
 
                 predict_gate, predict_dict, referred_dict = model(batch)
-                batch_predict_label_dict, last_sample_id, last_batch_latest_state = \
+                batch_predict_label_dict, last_sample_id, latest_state = \
                     evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
-                                               classify_slot_index_value_dict, last_batch_latest_state, last_sample_id)
+                                               classify_slot_index_value_dict, latest_state, last_sample_id)
                 result_list.append(batch_eval(batch_predict_label_dict, batch, 'cumulative'))
             result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
     if use_multi_gpu:
@@ -238,7 +238,7 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
 
 
 def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch, classify_slot_index_value_dict,
-                               last_batch_latest_state, last_sample_id):
+                               latest_state, last_sample_id):
     batch_predict_label_dict = {}
     for domain_slot in domain_slot_list:
         batch_predict_label_dict[domain_slot] = []
@@ -250,16 +250,15 @@ def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
         current_sample_id = batch[0][index].lower().split('.json')[0].strip()
         if current_sample_id != last_sample_id:
             last_sample_id = current_sample_id
-            last_batch_latest_state = {domain_slot: 'none' for domain_slot in domain_slot_list}
+            latest_state = {domain_slot: 'none' for domain_slot in domain_slot_list}
 
-        current_turn_state = last_batch_latest_state.copy()
+        current_turn_state = latest_state.copy()
         for domain_slot in domain_slot_list:
             utterance, inform_value_label = batch[5][index], batch[11][index]
 
             predict_hit_type_one_slot = predict_gate[domain_slot][index]
             predict_value_one_slot = predict_dict[domain_slot][index]
             predict_referral_one_slot = referred_dict[domain_slot][index]
-
             hit_type_predict = int(np.argmax(predict_hit_type_one_slot))
             referral_predict = int(np.argmax(predict_referral_one_slot))
 
@@ -272,14 +271,14 @@ def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
                 hit_value_predict = [start_idx_predict, end_idx_predict]
 
             predicted_value = predict_label_reconstruct(
-                hit_type_predict, inform_value_label, domain_slot, referral_predict, last_batch_latest_state,
+                hit_type_predict, inform_value_label, domain_slot, referral_predict, latest_state,
                 hit_value_predict, classify_slot_index_value_dict, utterance)
             if predicted_value == 'none':
-                predicted_value = last_batch_latest_state[domain_slot]
+                predicted_value = latest_state[domain_slot]
             current_turn_state[domain_slot] = predicted_value
             batch_predict_label_dict[domain_slot].append(predicted_value)
-        last_batch_latest_state = current_turn_state.copy()
-    return batch_predict_label_dict, last_sample_id, last_batch_latest_state
+        latest_state = current_turn_state.copy()
+    return batch_predict_label_dict, last_sample_id, latest_state
 
 
 def main():

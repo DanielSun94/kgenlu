@@ -20,18 +20,18 @@ if config_name == 'roberta':
         'process_name': 'no2',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
-        'pretrained_model': 'roberta',
+        'pretrained_model': 'roberta-base',
         'max_length': 512,
-        'batch_size': 8,
-        'epoch': 10,
+        'batch_size': 32,
+        'epoch': 20,
         'train_data_fraction': 1,
-        'encoder_d_model': 1024,
+        'encoder_d_model': 768,
         'learning_rate': 0.00001,
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
         'name': 'kgenlu-roberta',
         'use_history_utterance': True,
-        'use_history_label': False,
+        'use_history_label': True,
         'delex_system_utterance': False,
         'use_multi_gpu': False,
         'no_value_assign_strategy': 'value',  # value
@@ -42,7 +42,7 @@ if config_name == 'roberta':
         'referral_weight': 0.2,
         'overwrite_cache': True,
         'use_variant': True,
-        'mode': 'evaluation'  # train
+        'mode': 'train'  # train
     }
 else:
     raise ValueError('Invalid Config Name')

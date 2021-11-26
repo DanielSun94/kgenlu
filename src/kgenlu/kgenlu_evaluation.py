@@ -7,18 +7,13 @@ from kgenlu_read_data import domain_slot_type_map, tokenizer, domain_slot_list, 
 use_variant = args['use_variant']
 
 
-def batch_eval(batch_predict_label_dict, batch, mode):
+def batch_eval(batch_predict_label_dict, batch):
     result = {}
     for domain_slot in domain_slot_list:
         confusion_mat = np.zeros([5, len(batch_predict_label_dict[domain_slot])])  # 4 for tp, tn, fp, fn, pfi
         predict_result = batch_predict_label_dict[domain_slot]
-        # 注意，此处不应该使用cumulative label，而应该就使用current turn, 其余默认为none完成继承
-        if mode == 'turn':
-            label_result = [item[domain_slot] if domain_slot in item else 'none' for item in batch[3]]
-        elif mode == 'cumulative':
-            label_result = [item[domain_slot] if domain_slot in item else 'none' for item in batch[4]]
-        else:
-            raise ValueError('')
+        # 注意，此处应该使用cumulative label
+        label_result = [item[domain_slot] if domain_slot in item else 'none' for item in batch[4]]
         assert len(label_result) == len(predict_result)
         for idx in range(len(predict_result)):
             predict, label = predict_result[idx], label_result[idx]
@@ -102,6 +97,9 @@ def comprehensive_eval(result_list, data_type, process_name, epoch):
 
 def reconstruct_batch_predict_label_train(domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
                                           predict_referral_one_slot, train_batch, classify_slot_index_value_dict):
+    # 此处label reconstruct中，train和test的主要区别在于。train中我们默认有上一个turn的label真值，因此在命中referral时，我们
+    # 可以直接基于真值进行选择。也因此，我们在train data中采取的是乱序读取策略。而在test中，我们显然不会有上一个label的真值
+    # 所以，referral命中的策略会比较麻烦。我们要按照顺序读取数据，然后用上一轮的state来为下一轮的结果提供参照。
     batch_utterance, batch_last_turn_label, inform_value_label = train_batch[5], train_batch[10], train_batch[11]
 
     hit_type_predict = torch.argmax(predict_hit_type_one_slot, dim=1).cpu().detach().numpy()
@@ -157,3 +155,44 @@ def predict_label_reconstruct(hit_type_predict_item, inform_value, domain_slot, 
     else:
         raise ValueError('invalid value')
     return reconstructed_label
+
+
+def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch, classify_slot_index_value_dict,
+                               latest_state, last_sample_id):
+    batch_predict_label_dict = {}
+    for domain_slot in domain_slot_list:
+        batch_predict_label_dict[domain_slot] = []
+        predict_gate[domain_slot] = predict_gate[domain_slot].cpu().detach().numpy()
+        predict_dict[domain_slot] = predict_dict[domain_slot].cpu().detach().numpy()
+        referred_dict[domain_slot] = referred_dict[domain_slot].cpu().detach().numpy()
+
+    for index in range(len(batch[0])):
+        current_sample_id = batch[0][index].lower().split('.json')[0].strip()
+        if current_sample_id != last_sample_id:
+            last_sample_id = current_sample_id
+            latest_state = {domain_slot: 'none' for domain_slot in domain_slot_list}
+
+        current_turn_state = latest_state.copy()
+        for domain_slot in domain_slot_list:
+            utterance, inform_value_label = batch[5][index], batch[11][index]
+            predict_hit_type_one_slot = predict_gate[domain_slot][index]
+            predict_value_one_slot = predict_dict[domain_slot][index]
+            predict_referral_one_slot = referred_dict[domain_slot][index]
+            hit_type_predict = int(np.argmax(predict_hit_type_one_slot))
+            referral_predict = int(np.argmax(predict_referral_one_slot))
+
+            if domain_slot_type_map[domain_slot] == 'classify':
+                hit_value_predict = int(np.argmax(predict_value_one_slot))
+            else:
+                assert domain_slot_type_map[domain_slot] == 'span'
+                start_idx_predict = int(np.argmax(predict_value_one_slot[:, 0]))
+                end_idx_predict = int(np.argmax(predict_value_one_slot[:, 1]))
+                hit_value_predict = [start_idx_predict, end_idx_predict]
+
+            predicted_value = predict_label_reconstruct(
+                hit_type_predict, inform_value_label, domain_slot, referral_predict, latest_state,
+                hit_value_predict, classify_slot_index_value_dict, utterance)
+            current_turn_state[domain_slot] = predicted_value
+            batch_predict_label_dict[domain_slot].append(predicted_value)
+        latest_state = current_turn_state.copy()
+    return batch_predict_label_dict, last_sample_id, latest_state

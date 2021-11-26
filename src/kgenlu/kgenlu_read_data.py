@@ -28,8 +28,6 @@ domain_slot_type_map = NORMALIZE_MAP['slots-type']
 label_normalize_map = NORMALIZE_MAP['label_maps']
 train_domain = args['train_domain']
 test_domain = args['test_domain']
-use_history_label = args['use_history_label']
-use_history_utterance = args['use_history_utterance']
 use_multiple_gpu = args['multi_gpu']
 data_fraction = args['train_data_fraction']
 no_value_assign_strategy = args['no_value_assign_strategy']
@@ -39,7 +37,7 @@ variant_flag = args['use_variant']
 train_domain_set = set(train_domain.strip().split('$'))
 test_domain_set = set(test_domain.strip().split('$'))
 active_slot_count = dict()
-unpointable_slot_value_set = set()
+unpointable_slot_value_list = []
 
 
 def prepare_data(overwrite):
@@ -97,8 +95,8 @@ def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_in
 
         for dialogue_idx in raw_data_dict:
             utterance_list, state_dict, act_dict = raw_data_dict[dialogue_idx]
-            data_dict[dialogue_idx] = \
-                dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, classify_slot_value_index_dict)
+            data_dict[dialogue_idx] = dialogue_reorganize_and_normalize(dialogue_idx, utterance_list, state_dict,
+                                                                        act_dict, classify_slot_value_index_dict)
 
         logger.info(active_slot_count)
         logger.info('data reorganized, starting transforming data to the model required format')
@@ -295,6 +293,9 @@ class Sample(object):
         self.context_mask = context_mask
         self.inform_value = inform_value
         self.hit_type, self.hit_value, self.referred,  = {}, {}, {}
+
+        # 注意，上面的turn_change_label和cumulative_label是作为最终evaluation时比较的真值
+        # 而filtered state是模型训练时用于优化的y
         for domain_slot in domain_slot_list:
             self.hit_type[domain_slot] = filtered_state[domain_slot]['hit_type']
             self.referred[domain_slot] = filtered_state[domain_slot]['referred_slot_idx']
@@ -329,11 +330,13 @@ def state_hit_count(data_dict, data_type):
     logger.info(label_dict)
 
 
-def span_case_label_recovery_check(context, context_label_dict, state_dict,
-                                   dialogue_idx, turn_idx, turn_utterance_token, turn_history_utterance_token):
+def span_case_label_recovery_check(context, context_label_dict, state_dict, dialogue_idx, turn_idx):
     check_flag = True
     for domain_slot in state_dict:
         if domain_slot_type_map[domain_slot] == 'span':
+            # 注意，此处的context已经经过截断，所以可能出现无法正常恢复是因为截断的原因，因此如果最后token label为1，则判定可能出现这种情况
+            # 并且不视为恢复失败
+            end_one_flag = False
             true_label = state_dict[domain_slot].strip()
             context_label = context_label_dict[domain_slot]
             if 1 in context_label:
@@ -342,19 +345,17 @@ def span_case_label_recovery_check(context, context_label_dict, state_dict,
                     end_index = context_label[start_index:].index(0) + start_index
                 else:
                     end_index = len(context_label)
+                    end_one_flag = True
                 label_context = context[start_index: end_index]
                 reconstruct_label = \
                     tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(label_context)).strip()
-                if not approximate_equal_test(reconstruct_label, true_label, variant_flag):
+                if not approximate_equal_test(reconstruct_label, true_label, variant_flag) and not end_one_flag:
                     check_flag = False
                     print('reconstruct failed, '
                           'reconstruct_label: {}, true_label: {}'.format(reconstruct_label, true_label))
                     print(dialogue_idx)
                     print(turn_idx)
                     print(domain_slot)
-                    print(turn_utterance_token)
-                    print(turn_history_utterance_token)
-                    print(turn_history_utterance_token)
     return check_flag
 
 
@@ -379,14 +380,15 @@ def approximate_equal_test(reconstruct_label, true_label, use_variant):
                             equal = True
                 if true_label in label_normalize_map:
                     for label_variant in label_normalize_map[true_label]:
-                        reconstruct_true_label_variant = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(
-                            tokenizer.convert_tokens_to_ids(tokenizer.tokenize(' ' + label_variant)))).strip()
+                        reconstruct_true_label_variant = tokenizer.convert_tokens_to_string(
+                            tokenizer.convert_ids_to_tokens(tokenizer.convert_tokens_to_ids(
+                                tokenizer.tokenize(' ' + label_variant)))).strip()
                         reconstruct_label_ = tokenizer.convert_tokens_to_string(
                             tokenizer.convert_ids_to_tokens(
                                 tokenizer.convert_tokens_to_ids(
                                     tokenizer.tokenize(' ' + reconstruct_label)))).strip()
-                        trimmed_reconstruct_label = reconstruct_label_.replace(' ', '')
-                        trimmed_true_label = reconstruct_true_label_variant.replace(' ', '')
+                        trimmed_reconstruct_label, trimmed_true_label = reconstruct_label_.replace(' ', ''),\
+                            reconstruct_true_label_variant.replace(' ', '')
                         if reconstruct_label_ == reconstruct_true_label_variant or \
                                 trimmed_true_label == trimmed_reconstruct_label:
                             equal = True
@@ -405,14 +407,11 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             turn_data = dialogue[turn_idx]
             turn_active_domains = active_domain_structurize(turn_data['active_domain'])
             turn_active_slots = active_slot_structurize(turn_data['active_slots'])
-            turn_utterance_token, turn_utterance_token_map_list = \
-                utterance_tokenize(turn_data['current_turn_utterance_token'])
-            turn_history_utterance_token, turn_history_utterance_token_map_list \
-                = utterance_tokenize(turn_data['history_utterance_token'])
+            context_utterance_token_id, context_utterance_token_map_list = \
+                tokenize_to_id(turn_data['context_utterance_token'])
 
-            context, context_label_dict, context_mask = joint_alignment_and_truncate(
-                turn_history_utterance_token, turn_history_utterance_token_map_list, turn_utterance_token,
-                turn_utterance_token_map_list, turn_data['state'], max_input_length)
+            context, context_label_dict, context_mask = alignment_and_truncate(
+                context_utterance_token_id, context_utterance_token_map_list, turn_data['state'], max_input_length)
             turn_state = state_structurize(turn_data['state'], context_label_dict, classify_slot_value_index_dict)
             filtered_state = irrelevant_domain_label_mask(turn_state, interest_domain)
             turn_change_label = turn_data['turn_change_state']
@@ -421,7 +420,7 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             last_turn_label = turn_data['last_turn_label']
 
             assert span_case_label_recovery_check(context, context_label_dict, turn_data['turn_cumulative_labels'],
-                                                  dialogue_idx, turn_idx, turn_utterance_token, turn_history_utterance_token)
+                                                  dialogue_idx, turn_idx)
 
             data_for_model.append(
                 Sample(sample_id=dialogue_idx+'-'+str(turn_idx),
@@ -464,51 +463,34 @@ def irrelevant_domain_label_mask(turn_state, interest_domain):
     return filtered_turn_state
 
 
-def joint_alignment_and_truncate(turn_history_utterance_token, turn_history_utterance_token_map_list,
-                                 turn_utterance_token, turn_utterance_token_map_list, turn_state, max_input_length):
+def alignment_and_truncate(context_utterance_token_id, context_utterance_token_map_list, turn_state, max_input_length):
     # check
-    if use_history_utterance:
-        context = turn_utterance_token + [0] + turn_history_utterance_token
-    else:
-        context = turn_utterance_token
-
     context_label_dict = {}
     for domain_slot in domain_slot_list:
-        token_label = turn_state[domain_slot]['token_label']
-        history_token_label = turn_state[domain_slot]['history_token_label']
-        aligned_turn_label, aligned_history_label = [], []
-        assert turn_utterance_token_map_list[-1] == len(token_label) - 1
-        assert turn_history_utterance_token_map_list[-1] == len(history_token_label) - 1
+        token_label = turn_state[domain_slot]['context_token_label']
+        aligned_label = []
+        assert context_utterance_token_map_list[-1] == len(token_label) - 1
+        for origin_index in context_utterance_token_map_list:
+            aligned_label.append(token_label[origin_index])
+        context_label_dict[domain_slot] = aligned_label
 
-        for origin_index in turn_utterance_token_map_list:
-            aligned_turn_label.append(token_label[origin_index])
-        for origin_index in turn_history_utterance_token_map_list:
-            aligned_history_label.append(history_token_label[origin_index])
-        if not use_history_label:
-            aligned_history_label = [0 for _ in aligned_history_label]
-        if use_history_utterance:
-            context_label_dict[domain_slot] = aligned_turn_label + [0] + aligned_history_label
-        else:
-            context_label_dict[domain_slot] = aligned_turn_label
-
-    if len(context) > max_input_length:
-        # print('context too long')
-        context = context[: max_input_length]
+    if len(context_utterance_token_id) > max_input_length:
+        context_utterance_token = context_utterance_token_id[: max_input_length]
         for domain_slot in domain_slot_list:
             context_label_dict[domain_slot] = context_label_dict[domain_slot][: max_input_length]
         context_mask = [1 for _ in range(max_input_length)]
     else:
-        padding_num = max_input_length - len(context)
+        padding_num = max_input_length - len(context_utterance_token_id)
         padding_token = tokenizer.convert_tokens_to_ids([' '+PAD_token])
-        context_mask = [0] * len(context) + [1] * padding_num
-        context = context + padding_token * padding_num
+        context_mask = [0] * len(context_utterance_token_id) + [1] * padding_num
+        context_utterance_token = context_utterance_token_id + padding_token * padding_num
         for domain_slot in domain_slot_list:
             context_label_dict[domain_slot] = context_label_dict[domain_slot] + [0] * padding_num
         assert len(context_mask) == max_input_length
 
     for domain_slot in domain_slot_list:
-        assert len(context) == len(context_label_dict[domain_slot])
-    return context, context_label_dict, context_mask
+        assert len(context_utterance_token) == len(context_label_dict[domain_slot])
+    return context_utterance_token, context_label_dict, context_mask
 
 
 def active_domain_structurize(active_domains):
@@ -527,7 +509,7 @@ def active_slot_structurize(active_slots):
     return active_slot_list
 
 
-def utterance_tokenize(utterance_token):
+def tokenize_to_id(utterance_token):
     origin_token_idx, new_token_list, new_token_origin_token_map_list = 0, list(), list()
     for token in utterance_token:
         new_tokens = tokenizer.tokenize(' ' + token)
@@ -640,10 +622,11 @@ def normalize_data(utterance_list, state_dict, act_dict):
     return utterance_list, state_dict, act_dict
 
 
-def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, classify_slot_value_index_dict):
+def dialogue_reorganize_and_normalize(dialogue_idx, utterance_list, state_dict, act_dict,
+                                      classify_slot_value_index_dict):
     # check
     reorganize_data = {}
-    assert len(utterance_list) % 2 == 0
+    assert len(utterance_list) % 2 == 0 and dialogue_idx is not None  # dialogue index在此函数中无意义，只是debug时加一个定位参数
     cumulative_labels = {slot: 'none' for slot in domain_slot_list}
 
     history = ''
@@ -652,14 +635,6 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
     for domain_slot in domain_slot_list:
         history_token_label[domain_slot] = []
     for turn_idx in range(0, len(utterance_list)//2):
-        # 注意，数据中的state是积累值，而在设想中，label标签的是本轮的改变状态
-        # Trippy的设定中，一方面他用了label repeat的设定，但是另一方面又设计了极为复杂的处理策略把label repeat的影响消除。
-        # 我们干脆就不要这样做了，直接只用本轮对话和上轮的总结信息，判定信息的更新，而不是积累的信息
-
-        # We will change the user-system turn to system-user turn for the requirement of NLU task
-        # Therefore we will add a empty system utterance at first and discard the last system utterance (it
-        # typically doesn't contain useful information)
-        # And the act of first turn is empty and the act of last turn will be discard
         reorganize_data[turn_idx] = {}
 
         active_domain, active_slots, inform_info, inform_slot_filled_dict = \
@@ -680,14 +655,17 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
         system_utterance_token, user_utterance_token = tokenize(system_utterance), tokenize(user_utterance)
         current_turn_utterance = user_utterance + ' ' + SEP_token + ' ' + system_utterance
         current_turn_utterance_token = user_utterance_token + [SEP_token] + system_utterance_token
+        context_utterance = current_turn_utterance + ' ' + SEP_token + ' ' + history
+        context_utterance_token = current_turn_utterance_token + [SEP_token] + history_token
 
-        reorganize_data[turn_idx]['current_turn_utterance'] = CLS_token + ' ' + current_turn_utterance + ' ' + SEP_token
-        reorganize_data[turn_idx]['current_turn_utterance_token'] =\
-            [CLS_token] + current_turn_utterance_token + [SEP_token]
-
+        reorganize_data[turn_idx]['turn_utterance'] = CLS_token + ' ' + current_turn_utterance + ' ' + SEP_token
+        reorganize_data[turn_idx]['turn_utterance_token'] = [CLS_token] + current_turn_utterance_token + [SEP_token]
         reorganize_data[turn_idx]['history_utterance'] = CLS_token + ' ' + history
-        reorganize_data[turn_idx]['last_turn_label'] = last_turn_label
         reorganize_data[turn_idx]['history_utterance_token'] = [CLS_token] + history_token
+        reorganize_data[turn_idx]['context_utterance'] = CLS_token + ' ' + context_utterance
+        reorganize_data[turn_idx]['context_utterance_token'] = [CLS_token] + context_utterance_token
+
+        reorganize_data[turn_idx]['last_turn_label'] = last_turn_label
         reorganize_data[turn_idx]['state'] = {}
         reorganize_data[turn_idx]['inform_value'] = {}
         reorganize_data[turn_idx]['turn_change_state'] = modified_slots.copy()
@@ -698,20 +676,9 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
             value_label = cumulative_labels[domain_slot]
             inform_label = inform_info[domain_slot] if domain_slot in inform_info else 'none'
 
-            inform_value, referred_slot, turn_utterance_token_label, class_type, classify_value = \
-                get_turn_label(value_label, inform_label, current_turn_utterance_token,
+            inform_value, referred_slot, token_label, class_type, classify_value = \
+                get_turn_label(value_label, inform_label, context_utterance_token,
                                domain_slot, last_turn_label, classify_slot_value_index_dict)
-
-            assert len(turn_utterance_token_label) == \
-                   len(system_utterance_token) + len(user_utterance_token) + 1
-
-            # 此处需要注意一件事情，我们会根据value label置span的目标值。
-            # 而为了充分利用上下文信息，我们不能采取单轮信息预测的方式，而必须直接预测积累值。因此，我们需要识别历史turn中的index的情况
-            # 此处，只要当前的class type不为hit，说明class type的值是来源于其他信息，或者干脆就没有，此时需要重置history token label
-            # 只要为hit，哪怕有多重指代，也不会对正确性产生影响。
-            if class_type != 'hit':
-                history_token_label[domain_slot] = [0 for _ in range(len(history_token_label[domain_slot]))]
-
             if class_type == 'unpointable':
                 # 同样，unpointable也置空history label token, 这个是label本身的错误
                 class_type = 'none'
@@ -722,17 +689,12 @@ def dialogue_reorganize_and_normalize(utterance_list, state_dict, act_dict, clas
 
             reorganize_data[turn_idx]['state'][domain_slot]['class_type'] = class_type
             reorganize_data[turn_idx]['state'][domain_slot]['classify_value'] = classify_value
-            reorganize_data[turn_idx]['state'][domain_slot]['token_label'] = [0] + turn_utterance_token_label + [0]
+            reorganize_data[turn_idx]['state'][domain_slot]['context_token_label'] = [0] + token_label
             reorganize_data[turn_idx]['state'][domain_slot]['referred_slot'] = referred_slot
             reorganize_data[turn_idx]['inform_value'][domain_slot] = inform_value
-            reorganize_data[turn_idx]['state'][domain_slot]['history_token_label'] = \
-                [0] + history_token_label[domain_slot]
 
-            assert len(history_token_label[domain_slot]) == len(history_token)
-            history_token_label[domain_slot] = turn_utterance_token_label + [0] + history_token_label[domain_slot]
-
-        history = current_turn_utterance + ' ' + SEP_token + ' ' + history
-        history_token = current_turn_utterance_token + [SEP_token] + history_token
+        history = context_utterance
+        history_token = context_utterance_token
     return reorganize_data
 
 
@@ -769,6 +731,7 @@ def get_turn_label(value_label, inform_label, current_turn_utterance_token, doma
                     class_type = 'hit'
                 else:
                     class_type = 'unpointable'
+                    unpointable_slot_value_list.append(value_label)
             else:
                 assert domain_slot_type_map[domain_slot] == 'classify'
                 class_type = 'hit'
@@ -810,8 +773,6 @@ def check_label(value_label, user_utterance_token, domain_slot, classify_slot_va
                 in_user_utterance_flag, position = get_token_position(user_utterance_token, value_label_variant)
                 if in_user_utterance_flag:
                     break
-        if not in_user_utterance_flag:
-            unpointable_slot_value_set.add(value_label)
     return in_user_utterance_flag, position, value_index
 
 
@@ -1245,7 +1206,9 @@ def main():
         batch_count += 1
     print(batch_count)
     logger.info('data read success')
+    unpointable_slot_value_set = set(unpointable_slot_value_list)
     print(unpointable_slot_value_set)
+    print('unpointable_count: {}'.format(len(unpointable_slot_value_list)))
 
 
 if __name__ == '__main__':

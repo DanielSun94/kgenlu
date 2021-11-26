@@ -95,9 +95,9 @@ class PretrainedEncoder(nn.Module):
         :return: output:  [sequence_length, batch_size, word embedding]
         """
         # required format: [batch_size, sequence_length]
-        if self._model_name == 'roberta':
+        if 'roberta' in self._model_name:
             assert context.shape[1] <= 512
-        if self._model_name == 'roberta':
+        if 'roberta' in self._model_name:
             output = self.model(context, attention_mask=padding_mask)['last_hidden_state']
             return output
         if self._model_name == 'albert':

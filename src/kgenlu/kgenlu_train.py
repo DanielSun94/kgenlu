@@ -1,17 +1,16 @@
 import logging
 import torch
 import os
-from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
+from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map, SampleDataset
 from kgenlu_model import KGENLU
 from kgenlu_config import args, logger, DEVICE, medium_result_template, evaluation_folder, ckpt_template
 import pickle
 import torch.multiprocessing as mp
-from torch import nn, optim
-import numpy as np
+from torch import nn
 from tqdm import tqdm
 from collections import OrderedDict
-from kgenlu_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval, \
-    predict_label_reconstruct
+from kgenlu_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
+    evaluation_test_batch_eval
 import torch.distributed as dist
 from transformers import get_linear_schedule_with_warmup, AdamW
 
@@ -57,16 +56,15 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
                 if not use_multi_gpu:
                     train_batch = data_device_alignment(train_batch)
                 predict_gate, predict_dict, referred_dict = model(train_batch)
-                loss, train_batch_predict_label_dict = \
-                    compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch,
-                                                classify_slot_index_value_dict, local_rank)
+                loss, train_batch_predict_label_dict = train_compute_loss_and_batch_eval(
+                    predict_gate, predict_dict, referred_dict, train_batch, classify_slot_index_value_dict, local_rank)
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), args['max_grad_norm'])
                 optimizer.step()
                 scheduler.step()
                 full_loss += loss.detach().item()
-                epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch, 'turn'))
+                epoch_result.append(batch_eval(train_batch_predict_label_dict, train_batch))
                 del loss, predict_gate, predict_dict, referred_dict, train_batch  # for possible CUDA out of memory
             logger.info('average loss of epoch: {}: {}'.format(epoch, full_loss / len(train_loader)))
 
@@ -156,8 +154,8 @@ def result_print(comprehensive_result):
         logger.info(line)
 
 
-def compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch, classify_slot_index_value_dict,
-                                local_rank=None):
+def train_compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train_batch,
+                                      classify_slot_index_value_dict, local_rank=None):
     gate_weight = float(args['gate_weight'])
     span_weight = float(args['span_weight'])
     classify_weight = float(args['classify_weight'])
@@ -183,10 +181,9 @@ def compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train
             label_value_one_slot = train_batch[8][domain_slot].to(local_rank)
             label_referral_one_slot = train_batch[6][domain_slot].to(local_rank)
 
-        batch_predict_label_dict[domain_slot] = \
-            reconstruct_batch_predict_label_train(domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
-                                            predict_referral_one_slot, train_batch,
-                                            classify_slot_index_value_dict)
+        batch_predict_label_dict[domain_slot] = reconstruct_batch_predict_label_train(
+            domain_slot, predict_hit_type_one_slot, predict_value_one_slot,
+            predict_referral_one_slot, train_batch, classify_slot_index_value_dict)
 
         gate_loss += cross_entropy(predict_hit_type_one_slot, label_hit_type_one_slot)
         referral_loss += cross_entropy(predict_referral_one_slot, label_referral_one_slot)
@@ -199,6 +196,28 @@ def compute_loss_and_batch_eval(predict_gate, predict_dict, referred_dict, train
             span_loss += (cross_entropy(pred_start, label_start) + cross_entropy(pred_end, label_end)) / 2
     loss = gate_weight*gate_loss + classify_weight*classify_loss + referral_weight*referral_loss + span_weight*span_loss
     return loss, batch_predict_label_dict
+
+
+def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_dict, local_rank=None):
+    # eval的特点在于data_loader顺序采样
+    model.eval()
+    result_list = []
+    latest_state, last_sample_id = {domain_slot: 'none' for domain_slot in domain_slot_list}, ''
+    with torch.no_grad():
+        if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
+            for batch in tqdm(data_loader):
+                if not use_multi_gpu:
+                    batch = data_device_alignment(batch)
+
+                predict_gate, predict_dict, referred_dict = model(batch)
+                batch_predict_label_dict, last_sample_id, latest_state = \
+                    evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
+                                               classify_slot_index_value_dict, latest_state, last_sample_id)
+                result_list.append(batch_eval(batch_predict_label_dict, batch))
+            result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
+    if use_multi_gpu:
+        torch.distributed.barrier()
+    logger.info('model eval, data: {}, epoch: {} finished'.format(data_type, epoch))
 
 
 def load_result_multi_gpu(data_type, epoch):
@@ -214,83 +233,6 @@ def load_result_multi_gpu(data_type, epoch):
         for sample_result in batch_result:
             result_list.append(sample_result)
     return result_list
-
-
-def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_dict, local_rank=None):
-    model.eval()
-    result_list = []
-    latest_state, last_sample_id = {domain_slot: 'none' for domain_slot in domain_slot_list}, ''
-    with torch.no_grad():
-        if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
-            for batch in tqdm(data_loader):
-                if not use_multi_gpu:
-                    batch = data_device_alignment(batch)
-
-                predict_gate, predict_dict, referred_dict = model(batch)
-                batch_predict_label_dict, last_sample_id, latest_state = \
-                    evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch,
-                                               classify_slot_index_value_dict, latest_state, last_sample_id)
-                result_list.append(batch_eval(batch_predict_label_dict, batch, 'cumulative'))
-            result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
-    if use_multi_gpu:
-        torch.distributed.barrier()
-    logger.info('model eval, data: {}, epoch: {} finished'.format(data_type, epoch))
-
-
-def evaluation_test_batch_eval(predict_gate, predict_dict, referred_dict, batch, classify_slot_index_value_dict,
-                               latest_state, last_sample_id):
-    batch_predict_label_dict = {}
-    for domain_slot in domain_slot_list:
-        batch_predict_label_dict[domain_slot] = []
-        predict_gate[domain_slot] = predict_gate[domain_slot].cpu().detach().numpy()
-        predict_dict[domain_slot] = predict_dict[domain_slot].cpu().detach().numpy()
-        referred_dict[domain_slot] = referred_dict[domain_slot].cpu().detach().numpy()
-
-    for index in range(len(batch[0])):
-        current_sample_id = batch[0][index].lower().split('.json')[0].strip()
-        if current_sample_id != last_sample_id:
-            last_sample_id = current_sample_id
-            latest_state = {domain_slot: 'none' for domain_slot in domain_slot_list}
-
-        current_turn_state = latest_state.copy()
-        for domain_slot in domain_slot_list:
-            utterance, inform_value_label = batch[5][index], batch[11][index]
-
-            predict_hit_type_one_slot = predict_gate[domain_slot][index]
-            predict_value_one_slot = predict_dict[domain_slot][index]
-            predict_referral_one_slot = referred_dict[domain_slot][index]
-            hit_type_predict = int(np.argmax(predict_hit_type_one_slot))
-            referral_predict = int(np.argmax(predict_referral_one_slot))
-
-            if domain_slot_type_map[domain_slot] == 'classify':
-                hit_value_predict = int(np.argmax(predict_value_one_slot))
-            else:
-                assert domain_slot_type_map[domain_slot] == 'span'
-                start_idx_predict = int(np.argmax(predict_value_one_slot[:, 0]))
-                end_idx_predict = int(np.argmax(predict_value_one_slot[:, 1]))
-                hit_value_predict = [start_idx_predict, end_idx_predict]
-
-            predicted_value = predict_label_reconstruct(
-                hit_type_predict, inform_value_label, domain_slot, referral_predict, latest_state,
-                hit_value_predict, classify_slot_index_value_dict, utterance)
-            if predicted_value == 'none':
-                predicted_value = latest_state[domain_slot]
-            current_turn_state[domain_slot] = predicted_value
-            batch_predict_label_dict[domain_slot].append(predicted_value)
-        latest_state = current_turn_state.copy()
-    return batch_predict_label_dict, last_sample_id, latest_state
-
-
-def main():
-    pretrained_model = args['pretrained_model']
-    name = args['name']
-    pass_info = name, pretrained_model
-    logger.info('start training')
-    if use_multi_gpu:
-        num_gpu = torch.cuda.device_count()
-        mp.spawn(multi_gpu_main, nprocs=num_gpu, args=(num_gpu, pass_info))
-    else:
-        single_gpu_main(pass_info)
 
 
 def single_gpu_main(pass_info):
@@ -332,6 +274,18 @@ def multi_gpu_main(local_rank, _, pass_info):
 
     train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
           classify_slot_value_index_dict, local_rank)
+
+
+def main():
+    pretrained_model = args['pretrained_model']
+    name = args['name']
+    pass_info = name, pretrained_model
+    logger.info('start training')
+    if use_multi_gpu:
+        num_gpu = torch.cuda.device_count()
+        mp.spawn(multi_gpu_main, nprocs=num_gpu, args=(num_gpu, pass_info))
+    else:
+        single_gpu_main(pass_info)
 
 
 if __name__ == '__main__':

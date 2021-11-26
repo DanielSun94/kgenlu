@@ -30,17 +30,15 @@ if config_name == 'roberta':
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
         'name': 'kgenlu-roberta',
-        'use_history_utterance': True,
-        'use_history_label': True,
         'delex_system_utterance': False,
-        'use_multi_gpu': False,
+        'use_multi_gpu': True,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
         'gate_weight': 0.2,
         'span_weight': 0.4,
         'classify_weight': 0.2,
         'referral_weight': 0.2,
-        'overwrite_cache': True,
+        'overwrite_cache': False,
         'use_variant': True,
         'mode': 'train'  # train
     }
@@ -78,9 +76,6 @@ parser.add_argument('--name', help='name', default=config['name'], required=Fals
 parser.add_argument('--max_grad_norm', help='max_grad_norm', default=config['max_grad_norm'], required=False)
 parser.add_argument('--no_value_assign_strategy', help='test domain',
                     default=config['no_value_assign_strategy'], required=False)
-parser.add_argument('--use_history_label', help='history_label', default=config['use_history_label'], required=False)
-parser.add_argument('--use_history_utterance', help='use_history_utterance', default=config['use_history_utterance'],
-                    required=False)
 parser.add_argument('--max_len', help='test domain', default=config['max_length'], required=False)
 parser.add_argument('--auxiliary_domain_assign', help='auxiliary_domain_assign',
                     default=config['auxiliary_domain_assign'], required=False)

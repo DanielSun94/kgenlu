@@ -1,18 +1,20 @@
 import os
 import pickle
 import json
-from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
+import math
+from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Dataset
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from history_config import args, dev_idx_path, test_idx_path, act_data_path, label_normalize_path,\
     dialogue_data_path, SEP_token, CLS_token, cache_path, logger, MENTIONED_MAP_LIST
 from transformers import RobertaTokenizer
-
+import random
+import torch
 # use previous code
 from base_read_data import get_classify_slot_index_map, span_case_label_recovery_check, approximate_equal_test, \
-    get_dataset_idx, get_dialogue_info, prepare_data_for_model, construct_dataloader, SampleDataset, collate_fn, \
-    normalize_text, state_extract, delex_text, act_reorganize_and_normalize, tokenize, normalize_label, check_label, \
-    active_slot_structurize, active_domain_structurize, tokenize_to_id, alignment_and_truncate, span_idx_extract
+    get_dataset_idx, get_dialogue_info, SampleDataset, normalize_text, state_extract, \
+    delex_text, act_reorganize_and_normalize, tokenize, normalize_label, check_label, active_slot_structurize, \
+    active_domain_structurize, tokenize_to_id, alignment_and_truncate, span_idx_extract
 
 
 if 'roberta' in args['pretrained_model']:
@@ -75,10 +77,11 @@ def prepare_data():
         classify_slot_value_index_dict, classify_slot_index_value_dict = \
             get_classify_slot_index_map(idx_dict, dialogue_data, act_data)
         dev_data = process_data(idx_dict['dev'], dialogue_data, act_data, 'dev', classify_slot_value_index_dict)
-        test_data = process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict)
-        train_data = process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict)
-        test_data = construct_dataloader(test_data, 'test')
         dev_data = construct_dataloader(dev_data, 'dev')
+        test_data = process_data(idx_dict['test'], dialogue_data, act_data, 'test', classify_slot_value_index_dict)
+        test_data = construct_dataloader(test_data, 'test')
+        train_data = process_data(idx_dict['train'], dialogue_data, act_data, 'train', classify_slot_value_index_dict)
+        train_data = construct_dataloader(train_data, 'train')
         pickle.dump([classify_slot_value_index_dict, classify_slot_index_value_dict, train_data, dev_data, test_data],
                     open(cache_path, 'wb'))
     logger.info('data loaded')
@@ -92,6 +95,145 @@ def prepare_data():
     dev_loader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
     test_loader = DataLoader(test_data, sampler=test_sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
     return classify_slot_value_index_dict, classify_slot_index_value_dict, train_loader, dev_loader, test_loader
+
+
+def construct_dataloader(processed_data, data_type):
+    # check
+    sample_id_list = [item.sample_id for item in processed_data]
+    active_domain_list = [item.active_domain for item in processed_data]
+    active_slot_list = [item.active_slot for item in processed_data]
+    context_list = [item.context for item in processed_data]
+    context_mask_list = [item.context_mask for item in processed_data]
+    mentioned_slot_list = [item.mentioned_slot_list for item in processed_data]
+    label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict = {}, {}, {}, {}
+    for domain_slot in domain_slot_list:
+        label_list_dict[domain_slot] = [item.label[domain_slot] for item in processed_data]
+        hit_type_list_dict[domain_slot] = [item.hit_type[domain_slot] for item in processed_data]
+        mentioned_idx_list_dict[domain_slot] = [item.mentioned_idx[domain_slot] for item in processed_data]
+        hit_value_list_dict[domain_slot] = [item.hit_value[domain_slot] for item in processed_data]
+
+    # 此处由于train可以默认为知道上一轮结果真值，因此可以shuffle。而dev和test不知道，需要依赖预测进行判断，因此必须
+    if data_type == 'train':
+        idx_list = [i for i in range(len(sample_id_list))]
+        random.shuffle(idx_list)
+        new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list, new_context_mask_list, \
+            new_mentioned_slot_list, new_label_list_dict, new_hit_type_list_dict, new_mentioned_idx_list_dict,\
+            new_hit_value_list_dict = [], [], [], [], [], [], {}, {}, {}, {}
+        for domain_slot in domain_slot_list:
+            new_label_list_dict[domain_slot] = []
+            new_hit_type_list_dict[domain_slot] = []
+            new_mentioned_idx_list_dict[domain_slot] = []
+            new_hit_value_list_dict[domain_slot] = []
+        for idx in idx_list:
+            new_sample_id_list.append(sample_id_list[idx])
+            new_active_domain_list.append(active_domain_list[idx])
+            new_active_slot_list.append(active_slot_list[idx])
+            new_context_list.append(context_list[idx])
+            new_context_mask_list.append(context_mask_list[idx])
+            new_mentioned_slot_list.append(mentioned_slot_list[idx])
+            for domain_slot in domain_slot_list:
+                new_hit_type_list_dict[domain_slot].append(hit_type_list_dict[domain_slot][idx])
+                new_hit_value_list_dict[domain_slot].append(hit_value_list_dict[domain_slot][idx])
+                new_mentioned_idx_list_dict[domain_slot].append(mentioned_idx_list_dict[domain_slot][idx])
+                new_label_list_dict[domain_slot].append(label_list_dict[domain_slot][idx])
+        dataset = \
+            SampleDataset(new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list,
+                          new_context_mask_list, new_mentioned_slot_list, new_label_list_dict, new_hit_type_list_dict,
+                          new_mentioned_idx_list_dict, new_hit_value_list_dict)
+    else:
+        dataset = SampleDataset(sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list,
+                                mentioned_slot_list, label_list_dict, hit_type_list_dict, mentioned_idx_list_dict,
+                                hit_value_list_dict)
+    return dataset
+
+
+class SampleDataset(Dataset):
+    def __init__(self, sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list,
+                 mentioned_slot_list, label_list_dict, hit_type_list_dict, mentioned_idx_list_dict,
+                 hit_value_list_dict):
+        self.sample_id_list = sample_id_list
+        self.active_domain_list = active_domain_list
+        self.active_slot_list = active_slot_list
+        self.context_list = context_list
+        self.context_mask_list = context_mask_list
+        self.mentioned_slot_list = mentioned_slot_list
+        self.label_list_dict = label_list_dict
+        self.hit_type_list_dict = hit_type_list_dict
+        self.mentioned_idx_list_dict = mentioned_idx_list_dict
+        self.hit_value_list_dict = hit_value_list_dict
+
+    def __getitem__(self, index):
+        sample_id = self.sample_id_list[index]
+        active_domain = self.active_domain_list[index]
+        active_slot = self.active_slot_list[index]
+        context = self.context_list[index]
+        context_mask = self.context_mask_list[index]
+        mentioned_slot = self.mentioned_slot_list[index]
+        hit_type_dict, hit_value_dict, label_dict, mentioned_idx_dict = {}, {}, {}, {}
+        for domain_slot in domain_slot_list:
+            hit_type_dict[domain_slot] = self.hit_type_list_dict[domain_slot][index]
+            hit_value_dict[domain_slot] = self.hit_value_list_dict[domain_slot][index]
+            label_dict[domain_slot] = self.label_list_dict[domain_slot][index]
+            mentioned_idx_dict[domain_slot] = self.mentioned_idx_list_dict[domain_slot][index]
+        return sample_id, active_domain, active_slot, context, context_mask, label_dict, hit_type_dict, mentioned_slot,\
+            hit_value_dict
+
+    def get_fraction_data(self, fraction):
+        assert isinstance(fraction, float) and 0.01 <= fraction <= 1.0
+        new_len = math.floor(len(self.sample_id_list) * fraction)
+        new_sample_id_list = self.sample_id_list[: new_len]
+        new_active_domain_list = self.active_domain_list[: new_len]
+        new_active_slot_list = self.active_slot_list[: new_len]
+        new_context_list = self.context_list[: new_len]
+        new_context_mask_list = self.context_mask_list[: new_len]
+        new_mentioned_slot_list = self.mentioned_slot_list[: new_len]
+        new_hit_type_list_dict, new_hit_value_list_dict, new_label_list_dict, new_mentioned_idx_list_dict = \
+            {}, {}, {}, {}
+        for domain_slot in domain_slot_list:
+            new_hit_type_list_dict[domain_slot] = self.hit_type_list_dict[domain_slot][: new_len]
+            new_hit_value_list_dict[domain_slot] = self.hit_value_list_dict[domain_slot][: new_len]
+            new_label_list_dict[domain_slot] = self.label_list_dict[domain_slot][: new_len]
+            new_mentioned_idx_list_dict[domain_slot] = self.mentioned_idx_list_dict[domain_slot][: new_len]
+        return new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list, \
+            new_context_mask_list, new_mentioned_slot_list, new_label_list_dict, new_hit_type_list_dict, \
+            new_mentioned_idx_list_dict, new_hit_value_list_dict
+
+    def __len__(self):
+        return len(self.sample_id_list)
+
+
+def collate_fn(batch):
+    sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list, mentioned_slot_list, \
+        label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict = \
+        [], [], [], [], [], [], {}, {}, {}, {}
+    for domain_slot in domain_slot_list:
+        label_list_dict[domain_slot] = []
+        hit_type_list_dict[domain_slot] = []
+        hit_value_list_dict[domain_slot] = []
+        mentioned_idx_list_dict[domain_slot] = []
+    for sample in batch:
+        sample_id_list.append(sample[0])
+        active_domain_list.append(sample[1])
+        active_slot_list.append(sample[2])
+        context_list.append(sample[3])
+        context_mask_list.append(sample[4])
+        mentioned_slot_list.append(sample[5])
+        for domain_slot in domain_slot_list:
+            label_list_dict[domain_slot].append(sample[6][domain_slot])
+            hit_type_list_dict[domain_slot].append(sample[7][domain_slot])
+            hit_value_list_dict[domain_slot].append(sample[8][domain_slot])
+            mentioned_idx_list_dict[domain_slot].append(sample[9][domain_slot])
+
+    active_domain_list = torch.FloatTensor(active_domain_list)
+    active_slot_list = torch.FloatTensor(active_slot_list)
+    context_list = torch.LongTensor(context_list)
+    context_mask_list = torch.BoolTensor(context_mask_list)
+    for domain_slot in domain_slot_list:
+        hit_type_list_dict[domain_slot] = torch.LongTensor(hit_type_list_dict[domain_slot])
+        hit_value_list_dict[domain_slot] = torch.LongTensor(hit_value_list_dict[domain_slot])
+        mentioned_idx_list_dict[domain_slot] = torch.LongTensor(mentioned_idx_list_dict[domain_slot])
+    return sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list, mentioned_slot_list, \
+        label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict
 
 
 def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_index_dict):
@@ -138,7 +280,7 @@ def state_hit_count(data_dict, data_type):
     logger.info(label_dict)
 
 
-def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_index_dict, interest_domain, data_type):
+def prepare_data_for_model(data_dict, max_input_length, class_slot_value_index_dict, interest_domain, data_type):
     data_for_model = []
     for dialogue_idx in data_dict:
         dialogue = data_dict[dialogue_idx]
@@ -147,27 +289,31 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
             active_domain = active_domain_structurize(data['active_domain'])
             active_slot = active_slot_structurize(data['active_slot'])
             utterance_token_id, utterance_token_map_list = tokenize_to_id(data['context_utterance_token'])
+            mentioned_slot_split_list = [(0, 0, 0, 0, 0)]
+            mentioned_slot_list = data['mentioned_slot_list']
+            state = data['state']
+            label = data['label']
+
+            for item in mentioned_slot_list:
+                turn_idx, mentioned_type, domain, slot, value = item.split('$')
+                turn_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" "+turn_idx)])
+                domain_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + domain)])
+                slot_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + slot.replace('book-', ''))])
+                value_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + value)])
+                mentioned_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + mentioned_type)])
+                mentioned_slot_split_list.append(turn_id+domain_id+slot_id+value_id+mentioned_id)
 
             context, context_label_dict, context_mask = alignment_and_truncate(
                 utterance_token_id, utterance_token_map_list, data['state'], max_input_length)
-            turn_state = state_structurize(data['state'], context_label_dict, classify_slot_value_index_dict)
+            turn_state = state_structurize(state, mentioned_slot_list, context_label_dict,
+                                           class_slot_value_index_dict)
             filtered_state = irrelevant_domain_label_mask(turn_state, interest_domain)
-            mentioned_slot_set = data['mentioned_slot_set']
-            label = data['label']
 
-            assert span_case_label_recovery_check(context, context_label_dict, data['label'], dialogue_idx, turn_idx)
-            data_for_model.append(
-                DataSample(
-                    sample_id=dialogue_idx + '-' + str(turn_idx),
-                    active_domain=active_domain,
-                    active_slot=active_slot,
-                    filtered_state=filtered_state,
-                    label=label,
-                    context=context,
-                    context_mask=context_mask,
-                    mentioned_slot_set=mentioned_slot_set
-                )
-            )
+            assert span_case_label_recovery_check(context, context_label_dict, label, dialogue_idx, turn_idx)
+            data_for_model.append(DataSample(
+                sample_id=dialogue_idx+'-'+str(turn_idx), active_domain=active_domain, active_slot=active_slot,
+                filtered_state=filtered_state, label=label, context=context, context_mask=context_mask,
+                mentioned_slot_list=mentioned_slot_split_list))
     # count type
     hit_type_count_list = [0, 0, 0, 0]
     for item in data_for_model:
@@ -178,7 +324,7 @@ def prepare_data_for_model(data_dict, max_input_length, classify_slot_value_inde
     return data_for_model
 
 
-def state_structurize(state, context_label_dict, classify_slot_value_index_dict):
+def state_structurize(state, mentioned_slots, context_label_dict, classify_slot_value_index_dict):
     # check
     # 只有在hit时才会给value index置有效值，其余情况置空，因此前面置的-1之类的值不会产生不恰当的影响
     reorganized_state = {}
@@ -195,14 +341,12 @@ def state_structurize(state, context_label_dict, classify_slot_value_index_dict)
                 hit_value = -1
             else:
                 hit_value = -1, -1
-            mentioned_list = []
         elif no_value_assign_strategy == 'value':
             if domain_slot_type_map[domain_slot] == 'classify':
                 hit_value = len(classify_slot_value_index_dict[domain_slot])
             else:
                 hit_value = 0, 0
             mentioned_idx = 0
-            mentioned_list = [(0, 0, 0, 0, 0)]
         else:
             raise ValueError('')
 
@@ -213,20 +357,11 @@ def state_structurize(state, context_label_dict, classify_slot_value_index_dict)
             hit_type = 1
         elif class_type == 'mentioned':
             hit_type = 2
-            mentioned_slot_list = list(state[domain_slot]['mentioned_slot_set'])
             mentioned_slot = state[domain_slot]['mentioned_slot']
-            mentioned_idx = mentioned_slot_list.index(mentioned_slot) + 1
-            for item in mentioned_slot_list:
-                turn_idx, mentioned_type, domain, slot, value = item.split('$')
-                turn_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" "+turn_idx)])
-                domain_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + domain)])
-                slot_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + slot.replace('book-', ''))])
-                value_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + value)])
-                mentioned_id = tokenizer.convert_tokens_to_ids([" "+i for i in tokenize(" " + mentioned_type)])
-                mentioned_list.append(turn_id+domain_id+slot_id+value_id+mentioned_id)
+            mentioned_idx = mentioned_slots.index(mentioned_slot) + 1
         else:
             assert class_type == 'hit'
-            hit_type = 4
+            hit_type = 3
             if domain_slot_type_map[domain_slot] == 'classify':
                 hit_value = classify_value_index
 
@@ -236,7 +371,6 @@ def state_structurize(state, context_label_dict, classify_slot_value_index_dict)
 
         reorganized_state[domain_slot]['hit_value'] = hit_value
         reorganized_state[domain_slot]['hit_type'] = hit_type
-        reorganized_state[domain_slot]['mentioned_list'] = mentioned_list
         reorganized_state[domain_slot]['mentioned_idx'] = mentioned_idx
     return reorganized_state
 
@@ -253,29 +387,26 @@ def irrelevant_domain_label_mask(turn_state, interest_domain):
                 filtered_turn_state[domain_slot]['hit_value'] = -1
             else:
                 filtered_turn_state[domain_slot]['hit_value'] = -1, -1
-            filtered_turn_state[domain_slot]['mentioned_slot'] = turn_state[domain_slot]['mentioned_slot']
         else:
             filtered_turn_state[domain_slot]['hit_type'] = turn_state[domain_slot]['hit_type']
             filtered_turn_state[domain_slot]['mentioned_idx'] = turn_state[domain_slot]['mentioned_idx']
             filtered_turn_state[domain_slot]['hit_value'] = turn_state[domain_slot]['hit_value']
-            filtered_turn_state[domain_slot]['mentioned_list'] = turn_state[domain_slot]['mentioned_list']
     return filtered_turn_state
 
 
 class DataSample(object):
     def __init__(self, sample_id, active_domain, active_slot, filtered_state, label, context, context_mask,
-                 mentioned_slot_set):
+                 mentioned_slot_list):
         self.sample_id = sample_id
         self.active_domain = active_domain
         self.active_slot = active_slot
         self.context = context
         self.context_mask = context_mask
-        self.mentioned_slot_set = mentioned_slot_set
-        self.label, self.hit_type, self.mentioned_list, self.mentioned_idx, self.hit_value = {}, {}, {}, {}, {}
+        self.mentioned_slot_list = mentioned_slot_list
+        self.label, self.hit_type, self.mentioned_idx, self.hit_value = {}, {}, {}, {}
         for domain_slot in domain_slot_list:
             self.label[domain_slot] = label[domain_slot]
             self.hit_type[domain_slot] = filtered_state[domain_slot]['hit_type']
-            self.mentioned_list[domain_slot] = filtered_state[domain_slot]['mentioned_list']
             self.mentioned_idx[domain_slot] = filtered_state[domain_slot]['mentioned_idx']
             self.hit_value[domain_slot] = filtered_state[domain_slot]['hit_value']
 
@@ -324,7 +455,7 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, clas
             inform_label = inform_info[domain_slot] if domain_slot in inform_info else 'none'
             if inform_label != 'none':
                 mentioned_slot_set.add(str(turn_idx)+'$inform$'+domain+'$'+slot+'$'+inform_label)
-        reorganize_data[turn_idx]['mentioned_slot_set'] = mentioned_slot_set.copy()
+        reorganize_data[turn_idx]['mentioned_slot_list'] = list(mentioned_slot_set.copy())
 
         # label标记的是本轮的cumulative数据的真值
         reorganize_data[turn_idx]['label'] = labels.copy()
@@ -349,7 +480,6 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, clas
                 turn_mentioned_slot_set.add(str(turn_idx) + '$label$' + domain + '$' + slot + '$' + value_label)
             reorganize_data[turn_idx]['state'][domain_slot]['class_type'] = class_type
             reorganize_data[turn_idx]['state'][domain_slot]['classify_value'] = value_index
-            reorganize_data[turn_idx]['state'][domain_slot]['mentioned_slot_set'] = mentioned_slot_set
             reorganize_data[turn_idx]['state'][domain_slot]['mentioned_slot'] = mentioned_slot
             reorganize_data[turn_idx]['state'][domain_slot]['context_token_label'] = [0] + utterance_token_label
 

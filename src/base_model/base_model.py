@@ -1,7 +1,7 @@
 import torch
 from tqdm import tqdm
-from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
-from kgenlu_config import args, logger, PAD_token
+from base_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map
+from base_config import args, logger, PAD_token
 from torch import nn
 from transformers import RobertaModel, AlbertModel
 
@@ -12,16 +12,16 @@ def unit_test():
     pretrained_model = args['pretrained_model']
     name = args['name']
     data, classify_slot_value_index_dict, classify_slot_index_value_dict = prepare_data(overwrite=False)
-    model = KGENLU(name, pretrained_model, classify_slot_value_index_dict)
+    model = BaseModel(name, pretrained_model, classify_slot_value_index_dict)
     train_loader, dev_loader, test_loader = data
     for batch_data in tqdm(train_loader):
         model(batch_data)
     logger.info('feed success')
 
 
-class KGENLU(nn.Module):
+class BaseModel(nn.Module):
     def __init__(self, name, pretrained_model, classify_slot_value_index_dict):
-        super(KGENLU, self).__init__()
+        super(BaseModel, self).__init__()
         self.name = name
         self.embedding_dim = args['encoder_d_model']
         self.encoder = PretrainedEncoder(pretrained_model)
@@ -59,8 +59,8 @@ class KGENLU(nn.Module):
         """
         context token id shape [batch size, sequence length]
         """
-        active_domain = data[1]
-        active_slot = data[2]
+        # active_domain = data[1]
+        # active_slot = data[2]
         context_token = data[5]
         context_mask = (1 - data[9].type(torch.uint8))
         encode = self.encoder(context_token, padding_mask=context_mask)

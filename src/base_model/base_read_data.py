@@ -8,7 +8,7 @@ from torch.utils.data import Dataset, DataLoader, RandomSampler, SequentialSampl
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 import random
-from kgenlu_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
+from base_config import args, logger, dev_idx_path, test_idx_path, act_data_path, ACT_SLOT_NAME_MAP_DICT, \
     label_normalize_path, dialogue_data_cache_path, dialogue_data_path, SEP_token, CLS_token, DOMAIN_IDX_DICT, \
     SLOT_IDX_DICT, ACT_MAP_DICT, UNK_token, PAD_token, classify_slot_value_index_map_path, UNNORMALIZED_ACTION_SLOT
 from transformers import RobertaTokenizer
@@ -181,6 +181,7 @@ def construct_dataloader(processed_data, data_type):
         hit_value_list_dict[domain_slot] = [item.hit_value[domain_slot] for item in processed_data]
         referred_list_dict[domain_slot] = [item.referred[domain_slot] for item in processed_data]
 
+    # 此处由于train可以默认为知道上一轮结果真值，因此可以shuffle。而dev和test不知道，需要依赖预测进行判断，因此必须
     if data_type == 'train':
         idx_list = [i for i in range(len(sample_id_list))]
         random.shuffle(idx_list)
@@ -698,11 +699,11 @@ def dialogue_reorganize_and_normalize(dialogue_idx, utterance_list, state_dict, 
     return reorganize_data
 
 
-def get_turn_label(value_label, inform_label, current_turn_utterance_token, domain_slot, seen_slots,
+def get_turn_label(value_label, inform_label, context_utterance_token, domain_slot, seen_slots,
                    classify_slot_value_index_dict):
     # four types of class info has it's priority
     # 尽可能提供补充标签
-    utterance_token_label = [0 for _ in current_turn_utterance_token]
+    utterance_token_label = [0 for _ in context_utterance_token]
 
     informed_value = 'none'
     referred_slot = 'none'
@@ -711,7 +712,7 @@ def get_turn_label(value_label, inform_label, current_turn_utterance_token, doma
         class_type = value_label
     else:
         in_utterance_flag, position, value_index = \
-            check_label(value_label, current_turn_utterance_token, domain_slot, classify_slot_value_index_dict)
+            check_label(value_label, context_utterance_token, domain_slot, classify_slot_value_index_dict)
         is_informed, informed_value = check_slot_inform(value_label, inform_label)
         referred_slot = check_slot_referral(value_label, domain_slot, seen_slots)
 

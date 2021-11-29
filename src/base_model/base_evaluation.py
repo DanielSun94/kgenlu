@@ -1,8 +1,8 @@
 import torch
 import numpy as np
 import csv
-from kgenlu_config import args, result_template, evaluation_folder
-from kgenlu_read_data import domain_slot_type_map, tokenizer, domain_slot_list, approximate_equal_test
+from base_config import args, result_template, evaluation_folder
+from base_read_data import domain_slot_type_map, tokenizer, domain_slot_list, approximate_equal_test
 
 use_variant = args['use_variant']
 

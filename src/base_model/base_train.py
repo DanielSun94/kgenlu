@@ -1,18 +1,19 @@
 import logging
 import torch
 import os
-from kgenlu_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map, SampleDataset
-from kgenlu_model import KGENLU
-from kgenlu_config import args, logger, DEVICE, medium_result_template, evaluation_folder, ckpt_template
+from base_read_data import prepare_data, Sample, domain_slot_list, domain_slot_type_map, SampleDataset
+from base_model import BaseModel
+from base_config import args, DEVICE, medium_result_template, evaluation_folder, ckpt_template, logger
 import pickle
 import torch.multiprocessing as mp
 from torch import nn
 from tqdm import tqdm
 from collections import OrderedDict
-from kgenlu_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
+from base_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
     evaluation_test_batch_eval
 import torch.distributed as dist
 from transformers import get_linear_schedule_with_warmup, AdamW
+
 
 PROCESS_GLOBAL_NAME = args['process_name']
 use_multi_gpu = args['multi_gpu']
@@ -87,12 +88,12 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
         if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
             if mode != 'train':
                 assert ckpt_path is None and load_cpkt_path is not None
-                eval_model = KGENLU(name, args['pretrained_model'], classify_slot_value_index_dict)
+                eval_model = BaseModel(name, args['pretrained_model'], classify_slot_value_index_dict)
                 eval_model = eval_model.cuda(DEVICE)
                 load_model(multi_gpu=False, model=eval_model, ckpt_path=load_cpkt_path)
             else:
                 assert ckpt_path is not None
-                eval_model = KGENLU(name, args['pretrained_model'], classify_slot_value_index_dict)
+                eval_model = BaseModel(name, args['pretrained_model'], classify_slot_value_index_dict)
                 eval_model = eval_model.cuda(DEVICE)
                 load_model(multi_gpu=False, model=eval_model, ckpt_path=ckpt_path)
             logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
@@ -239,7 +240,7 @@ def single_gpu_main(pass_info):
     data, classify_slot_value_index_dict, classify_slot_index_value_dict = prepare_data(overwrite=overwrite)
     train_loader, dev_loader, test_loader = data
     name, pretrained_model = pass_info
-    model = KGENLU(name, pretrained_model, classify_slot_value_index_dict)
+    model = BaseModel(name, pretrained_model, classify_slot_value_index_dict)
     model = model.cuda(DEVICE)
     if os.path.exists(load_cpkt_path):
         load_model(use_multi_gpu, model, load_cpkt_path)
@@ -262,7 +263,7 @@ def multi_gpu_main(local_rank, _, pass_info):
     # DEVICE = torch.device("cuda", local_rank)
     torch.cuda.set_device(local_rank)
 
-    model = KGENLU(name, pretrained_model, classify_slot_value_index_dict)
+    model = BaseModel(name, pretrained_model, classify_slot_value_index_dict)
     model = model.cuda(local_rank)  # 将模型拷贝到每个gpu上
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank],

@@ -20,18 +20,18 @@ if config_name == 'roberta':
         'process_name': 'no2',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
-        'pretrained_model': 'roberta-base',
+        'pretrained_model': 'roberta-large',
         'max_length': 512,
-        'batch_size': 32,
-        'epoch': 20,
+        'batch_size': 8,
+        'epoch': 30,
         'train_data_fraction': 1,
-        'encoder_d_model': 768,
-        'learning_rate': 0.00001,
+        'encoder_d_model': 1024,
+        'learning_rate': 0.000005,
         'device': 'cuda:1',
         'auxiliary_domain_assign': True,
         'name': 'kgenlu-roberta',
         'delex_system_utterance': False,
-        'use_multi_gpu': True,
+        'use_multi_gpu': False,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
         'gate_weight': 0.2,
@@ -85,26 +85,6 @@ parser.add_argument("--warmup_proportion", default=0.1, type=float, help="warmup
 args = vars(parser.parse_args())
 
 
-# logger
-log_file_name = os.path.abspath('../../resource/log.txt')
-FORMAT = "%(asctime)s %(message)s"
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
-logging.basicConfig(level=logging.INFO, format=FORMAT, filename=log_file_name)
-console_logger = logging.StreamHandler()
-file_logger = logging.FileHandler(log_file_name, mode='a', encoding='UTF-8')
-file_logger.setLevel(logging.INFO)
-# console output format
-stream_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(message)s")
-# file output format
-logging_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(message)s")
-file_logger.setFormatter(logging_format)
-console_logger.setFormatter(stream_format)
-logger.addHandler(file_logger)
-logger.addHandler(console_logger)
-logger.info("|------logger.info-----")
-
-
 # special token
 UNK_token, PAD_token, SEP_token, CLS_token = '<unk>', '<pad>', '</s>', '<s>'
 DATA_TYPE_UTTERANCE, DATA_TYPE_SLOT, DATA_TYPE_BELIEF = 'utterance', 'slot', 'belief'
@@ -112,6 +92,7 @@ UNNORMALIZED_ACTION_SLOT = {'none', 'ref', 'choice', 'addr', 'post', 'ticket', '
 
 # resource path
 multiwoz_dataset_folder = os.path.abspath('../../resource/multiwoz')
+cache_folder = os.path.abspath('../../resource/base_model_cache')
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
 # dataset, time, epoch, general acc
 evaluation_folder = os.path.abspath('../../resource/evaluation')
@@ -124,8 +105,8 @@ dev_idx_path = os.path.join(multiwoz_dataset_folder, 'valListFile.json')
 test_idx_path = os.path.join(multiwoz_dataset_folder, 'testListFile.json')
 label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
-dialogue_data_cache_path = os.path.join(multiwoz_dataset_folder, 'dialogue_data_cache_{}.pkl')
-classify_slot_value_index_map_path = os.path.join(multiwoz_dataset_folder, 'classify_slot_value_index_map_path.pkl')
+dialogue_data_cache_path = os.path.join(cache_folder, 'dialogue_data_cache_{}.pkl')
+classify_slot_value_index_map_path = os.path.join(cache_folder, 'classify_slot_value_index_map_path.pkl')
 
 
 # act
@@ -181,3 +162,23 @@ ACT_MAP_DICT = {
     'booking-stay': 'booking-book-stay',
     'booking-time': 'booking-book-time',
 }
+
+
+# logger
+log_file_name = os.path.abspath('../../resource/log.txt')
+FORMAT = "%(asctime)s %(message)s"
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logging.basicConfig(level=logging.INFO, format=FORMAT, filename=log_file_name)
+console_logger = logging.StreamHandler()
+file_logger = logging.FileHandler(log_file_name, mode='a', encoding='UTF-8')
+file_logger.setLevel(logging.INFO)
+# console output format
+stream_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(message)s")
+# file output format
+logging_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(message)s")
+file_logger.setFormatter(logging_format)
+console_logger.setFormatter(stream_format)
+logger.addHandler(file_logger)
+logger.addHandler(console_logger)
+logger.info("|------logger.info-----")

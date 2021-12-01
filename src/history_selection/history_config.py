@@ -15,10 +15,10 @@ if config_name == 'roberta':
         'pretrained_model': 'roberta-large',
         'max_length': 512,
         'batch_size': 8,
-        'epoch': 30,
-        'train_data_fraction': 1,
+        'epoch': 10,
+        'train_data_fraction': 0.001,
         'encoder_d_model': 1024,
-        'learning_rate': 0.000005,
+        'learning_rate': 0.00001,
         'device': 'cuda:1',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
@@ -26,12 +26,14 @@ if config_name == 'roberta':
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
         'gate_weight': 0.2,
+        'mentioned_weight': 0.2,
         'span_weight': 0.4,
         'classify_weight': 0.2,
-        'referral_weight': 0.2,
         'overwrite_cache': False,
         'use_label_variant': True,
-        'mode': 'train'  # train
+        'mode': 'train',  # train, eval
+        'lock_embedding_parameter': True,
+        'mentioned_slot_pool_size': 12
     }
 else:
     raise ValueError('Invalid Config Name')
@@ -43,14 +45,16 @@ parser = argparse.ArgumentParser(description='history_selection')
 parser.add_argument('--load_ckpt_path', help='', default=config['load_ckpt_path'])
 parser.add_argument('--use_label_variant', help='', default=config['use_label_variant'])
 parser.add_argument('--mode', help='', default=config['mode'])
+parser.add_argument('--lock_embedding_parameter', help='', default=config['lock_embedding_parameter'])
 parser.add_argument('--start_epoch', help='', default=config['start_epoch'])
 parser.add_argument('--process_name', help='', default=config['process_name'])
 parser.add_argument('--overwrite_cache', help='', default=config['overwrite_cache'])
+parser.add_argument('--mentioned_slot_pool_size', help='', default=config['mentioned_slot_pool_size'])
 parser.add_argument('--train_domain', help='', default=config['train_domain'])
 parser.add_argument('--gate_weight', help='', default=config['gate_weight'])
 parser.add_argument('--span_weight', help='', default=config['span_weight'])
 parser.add_argument('--classify_weight', help='', default=config['classify_weight'])
-parser.add_argument('--referral_weight', help='', default=config['referral_weight'])
+parser.add_argument('--mentioned_weight', help='', default=config['mentioned_weight'])
 parser.add_argument('--delex_system_utterance', help='', default=config['delex_system_utterance'])
 parser.add_argument('--multi_gpu', help='', default=config['use_multi_gpu'])
 parser.add_argument('--train_data_fraction', help='', default=config['train_data_fraction'])
@@ -113,9 +117,6 @@ logger.addHandler(file_logger)
 logger.addHandler(console_logger)
 logger.info("|------logger.info-----")
 
-IDX_SLOT_DICT = {0: 'leaveat', 1: 'destination', 2: 'departure', 3: 'arriveby', 4: 'people', 5: 'day', 6: 'time',
-                 7: 'food', 8: 'pricerange', 9: 'name', 10: 'area', 11: 'stay', 12: 'parking', 13: 'stars',
-                 14: 'internet', 15: 'type'}
 
 MENTIONED_MAP_LIST = [
     {'leaveat', 'arriveby', 'time'},
@@ -131,3 +132,58 @@ MENTIONED_MAP_LIST = [
     {'internet'},
     {'type'}
 ]
+
+
+# 以下内容均为直接复制
+act_type = {
+    'inform',
+    'request',
+    'select',  # for restaurant, hotel, attraction
+    'recommend',  # for restaurant, hotel, attraction
+    'not found',  # for restaurant, hotel, attraction
+    'request booking info',  # for restaurant, hotel, attraction
+    'offer booking',  # for restaurant, hotel, attraction, train
+    'inform booked',  # for restaurant, hotel, attraction, train
+    'decline booking'  # for restaurant, hotel, attraction, train
+    # did not use four meaningless act, 'welcome', 'greet', 'bye', 'reqmore'
+}
+DOMAIN_IDX_DICT = {'restaurant': 0, 'hotel': 1, 'attraction': 2, 'taxi': 3, 'train': 4}
+IDX_DOMAIN_DICT = {0: 'restaurant', 1: 'hotel', 2: 'attraction', 3: 'taxi', 4: 'train'}
+
+SLOT_IDX_DICT = {'leaveat': 0, 'destination': 1, 'departure': 2, 'arriveby': 3, 'people': 4, 'day': 5, 'time': 6,
+                 'food': 7, 'pricerange': 8, 'name': 9, 'area': 10, 'stay': 11, 'parking': 12, 'stars': 13,
+                 'internet': 14, 'type': 15}
+
+IDX_SLOT_DICT = {0: 'leaveat', 1: 'destination', 2: 'departure', 3: 'arriveby', 4: 'people', 5: 'day', 6: 'time',
+                 7: 'food', 8: 'pricerange', 9: 'name', 10: 'area', 11: 'stay', 12: 'parking', 13: 'stars',
+                 14: 'internet', 15: 'type'}
+
+
+# Required for mapping slot names in dialogue_acts.json file
+# to proper designations.
+ACT_SLOT_NAME_MAP_DICT = {'depart': 'departure', 'dest': 'destination', 'leave': 'leaveat', 'arrive': 'arriveby',
+                          'price': 'pricerange'}
+
+ACT_MAP_DICT = {
+    'taxi-depart': 'taxi-departure',
+    'taxi-dest': 'taxi-destination',
+    'taxi-leave': 'taxi-leaveat',
+    'taxi-arrive': 'taxi-arriveby',
+    'train-depart': 'train-departure',
+    'train-dest': 'train-destination',
+    'train-leave': 'train-leaveat',
+    'train-arrive': 'train-arriveby',
+    'train-people': 'train-book_people',
+    'restaurant-price': 'restaurant-pricerange',
+    'restaurant-people': 'restaurant-book-people',
+    'restaurant-day': 'restaurant-book-day',
+    'restaurant-time': 'restaurant-book-time',
+    'hotel-price': 'hotel-pricerange',
+    'hotel-people': 'hotel-book-people',
+    'hotel-day': 'hotel-book-day',
+    'hotel-stay': 'hotel-book-stay',
+    'booking-people': 'booking-book-people',
+    'booking-day': 'booking-book-day',
+    'booking-stay': 'booking-book-stay',
+    'booking-time': 'booking-book-time',
+}

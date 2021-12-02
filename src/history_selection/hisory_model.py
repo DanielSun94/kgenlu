@@ -37,7 +37,7 @@ class HistorySelectionModel(Module):
         super(HistorySelectionModel, self).__init__()
         self.name = name
         if use_multi_gpu:
-            assert self.local_rank is not None
+            assert local_rank is not None
             self.target_id = local_rank
         else:
             self.target_id = DEVICE
@@ -73,8 +73,8 @@ class HistorySelectionModel(Module):
         # 由于turn, domain, slot, mentioned type需要经常用到，因此构建一下这些常用策略的embedding
         self.common_token_embedding_dict = None
 
-    def get_common_token_embedding(self):
-        common_token_list, common_token_embedding_dict = ['label', 'inform'], {}
+    def get_common_token_embedding(self, classify_slot_value_index_dict):
+        common_token_list, common_token_embedding_dict = ['label', 'inform', 'dontcare'], {}
         for i in range(0, 30):
             common_token_list.append(str(i))
         for domain_slot in domain_slot_list:
@@ -82,9 +82,17 @@ class HistorySelectionModel(Module):
             domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
             common_token_list.append(domain)
             common_token_list.append(slot)
+        for domain_slot in classify_slot_value_index_dict:
+            for value in classify_slot_value_index_dict[domain_slot]:
+                common_token_list.append(value)
+
         for key in common_token_list:
             token = LongTensor(tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + key))).to(self.target_id)
-            common_token_embedding_dict[key] = mean(self.token_embedding(token), dim=0, keepdim=True)
+            common_token_embedding_dict[key] = torch.FloatTensor(
+                mean(self.token_embedding(token), dim=0, keepdim=True).detach().to('cpu').numpy()).to(self.target_id)
+        token = LongTensor(tokenizer.convert_tokens_to_ids(tokenizer.tokenize("<pad>"))).to(self.target_id)
+        common_token_embedding_dict["<pad>"] = torch.FloatTensor(
+            mean(self.token_embedding(token), dim=0, keepdim=True).detach().to('cpu').numpy()).to(self.target_id)
         self.common_token_embedding_dict = common_token_embedding_dict
 
     def forward(self, data):
@@ -93,8 +101,9 @@ class HistorySelectionModel(Module):
         """
         id_list, active_domain, active_slot, context_token = data[0], data[1], data[2], data[3]
         context_mask, possible_mentioned_slot_list_dict = (1 - data[4].type(torch.uint8)), data[9]
-        possible_mentioned_slot_list_mask_dict = data[10]
-        possible_mentioned_slot_list_dict = self.get_mentioned_slots_embedding(possible_mentioned_slot_list_dict)
+        possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_mask_dict = data[10], data[11]
+        possible_mentioned_slot_list_dict = self.get_mentioned_slots_embedding(
+            possible_mentioned_slot_list_dict, str_possible_mentioned_slot_list_mask_dict)
 
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_value_dict = {}
@@ -139,23 +148,46 @@ class HistorySelectionModel(Module):
             gate_predict_dict[domain_slot] = self.gate_predict[domain_slot](embedding)
         return gate_predict_dict
 
-    def get_mentioned_slots_embedding(self, possible_mentioned_slot_list_dict):
+    def get_mentioned_slots_embedding(self, possible_mentioned_slot_list_dict, str_possible_mentioned_slot_list_dict):
         # mentioned slots embedding获取，因为数据本身并不齐整(主要是部分value可能一次解析出多个token id)，因此只能这么做
-        # TODO 目测这里是速度瓶颈，想想办法能不能快一点
         target_id = self.target_id
         mentioned_slots_embedding_dict = {}
         for domain_slot in domain_slot_list:
             mentioned_slots_embedding_dict[domain_slot] = []
             for sample_idx in range(len(possible_mentioned_slot_list_dict[domain_slot])):
                 sample_list = []
+                str_mentioned_slot_list = str_possible_mentioned_slot_list_dict[domain_slot][sample_idx]
                 mentioned_slot_list = possible_mentioned_slot_list_dict[domain_slot][sample_idx]
-                for mentioned_slot in mentioned_slot_list:
-                    turn = mean(self.token_embedding(LongTensor(mentioned_slot[0]).to(target_id)), dim=0, keepdim=True)
-                    domain = mean(self.token_embedding(LongTensor(mentioned_slot[1]).to(target_id)), dim=0,
-                                  keepdim=True)
-                    slot = mean(self.token_embedding(LongTensor(mentioned_slot[2]).to(target_id)), dim=0, keepdim=True)
-                    value = mean(self.token_embedding(LongTensor(mentioned_slot[3]).to(target_id)), dim=0, keepdim=True)
-                    type_ = mean(self.token_embedding(LongTensor(mentioned_slot[4]).to(target_id)), dim=0, keepdim=True)
+                for mentioned_slot, str_mentioned_slot in zip(mentioned_slot_list, str_mentioned_slot_list):
+                    # 按照正常情况，这些token一定能找到命中的值
+                    turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
+                    domain = self.common_token_embedding_dict[str_mentioned_slot[1]]
+                    slot = self.common_token_embedding_dict[str_mentioned_slot[2]]
+                    type_ = self.common_token_embedding_dict[str_mentioned_slot[4]]
+                    if str_mentioned_slot[3] in self.common_token_embedding_dict:
+                        value = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    else:
+                        # 注意，此处的domain_slot和domain slot其实可能分指两个不同的domain-slot pair。但是根据我们的设计
+                        # 根据domain_slot做mapping并不会导致classify判定出问题
+                        # 另一方面，尽管我们预先做了cache，但是在一种特定的情况下，classify case的数据结果也可能出现OOv
+                        # 这种情况是mentioned slot value在act中，但是这个act inform并没有被采纳，这就会导致inform value
+                        # 不会再classify value dict中被记下，从而导致OOV
+                        # if domain_slot_type_map[domain_slot] == 'classify' and \
+                        #         str_mentioned_slot[3] not in self.common_token_embedding_dict:
+                        #     assert str_mentioned_slot[4] == 'inform'
+                        value = mean(self.token_embedding(LongTensor(mentioned_slot[3]).to(target_id)), dim=0,
+                                     keepdim=True)
+
+                    # turn = mean(self.token_embedding(LongTensor(mentioned_slot[0]).to(target_id)),
+                    # dim=0, keepdim=True)
+                    # domain = mean(self.token_embedding(LongTensor(mentioned_slot[1]).to(target_id)), dim=0,
+                    #               keepdim=True)
+                    # slot = mean(self.token_embedding(LongTensor(mentioned_slot[2]).to(target_id)), dim=0,
+                    # keepdim=True)
+                    # value = mean(self.token_embedding(LongTensor(mentioned_slot[3]).to(target_id)), dim=0,
+                    # keepdim=True)
+                    # type_ = mean(self.token_embedding(LongTensor(mentioned_slot[4]).to(target_id)), dim=0,
+                    # keepdim=True)
                     sample_list.append(mean(cat((value, mean(cat((turn, domain, slot, type_), dim=0), dim=0,
                                                              keepdim=True)), dim=0), dim=0, keepdim=True))
                 assert len(sample_list) == mentioned_slot_pool_size

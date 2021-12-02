@@ -1,5 +1,5 @@
-import logging
 import torch
+from torch import BoolTensor, LongTensor
 import os
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from hisory_model import HistorySelectionModel
@@ -10,7 +10,7 @@ from torch import nn
 from tqdm import tqdm
 from collections import OrderedDict
 from history_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
-    evaluation_test_batch_eval
+    evaluation_test_eval
 import torch.distributed as dist
 from transformers import get_linear_schedule_with_warmup, AdamW
 
@@ -19,7 +19,7 @@ PROCESS_GLOBAL_NAME = args['process_name']
 use_multi_gpu = args['multi_gpu']
 overwrite = args['overwrite_cache']
 start_epoch = args['start_epoch']
-load_ckpt_path = args['load_ckpt_path']
+predefined_ckpt_path = args['load_ckpt_path']
 mode = args['mode']
 train_epoch = args['epoch']
 warmup_proportion = args['warmup_proportion']
@@ -43,7 +43,7 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps,
                                                 num_training_steps=max_step)
     global_step = 0
-    ckpt_path = None
+    current_process_ckpt_path = None
     for epoch in range(train_epoch):
         logger.info("Epoch :{}".format(epoch))
         if use_multi_gpu:
@@ -61,7 +61,9 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
                     continue
 
                 if not use_multi_gpu:
-                    train_batch = data_device_alignment(train_batch)
+                    train_batch = data_device_alignment(train_batch, DEVICE)
+                else:
+                    train_batch = data_device_alignment(train_batch, local_rank)
                 predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict = model(train_batch)
                 loss, train_batch_predict_label_dict = train_compute_loss_and_batch_eval(
                     predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict, train_batch,
@@ -89,28 +91,39 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
             else:
                 result_print(comprehensive_eval(epoch_result, 'train', PROCESS_GLOBAL_NAME, epoch))
 
-            #  save model
-            ckpt_path = ckpt_template.format(PROCESS_GLOBAL_NAME, epoch)
-            save_model(use_multi_gpu, model, ckpt_path, local_rank)
+            # save model
+            if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
+                current_process_ckpt_path = ckpt_template.format(PROCESS_GLOBAL_NAME, epoch)
+                save_model(use_multi_gpu, model, current_process_ckpt_path, local_rank)
 
         # validation and test，此处因为原始数据判定的顺序问题，不可以使用distributed model，因此要重新载入
         if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
-            if mode != 'train':
-                assert ckpt_path is None and load_ckpt_path is not None
-                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict)
-                eval_model = eval_model.cuda(DEVICE)
-                eval_model.get_common_token_embedding()
-                load_model(multi_gpu=False, model=eval_model, ckpt_path=load_ckpt_path)
+            if use_multi_gpu:
+                assert local_rank is not None
+                target_device = local_rank
             else:
-                assert ckpt_path is not None
-                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict)
-                eval_model = eval_model.cuda(DEVICE)
-                eval_model.get_common_token_embedding()
-                load_model(multi_gpu=False, model=eval_model, ckpt_path=ckpt_path)
+                target_device = DEVICE
+
+            if mode != 'train':
+                assert current_process_ckpt_path is None and predefined_ckpt_path is not None
+                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict,
+                                                   local_rank=target_device)
+                eval_model = eval_model.cuda(target_device)
+                eval_model.get_common_token_embedding(classify_slot_value_index_dict)
+                load_model(multi_gpu=use_multi_gpu, model=eval_model, ckpt_path=predefined_ckpt_path,
+                           local_rank=target_device)
+            else:
+                assert current_process_ckpt_path is not None
+                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict,
+                                                   local_rank=target_device)
+                eval_model = eval_model.cuda(target_device)
+                eval_model.get_common_token_embedding(classify_slot_value_index_dict)
+                load_model(multi_gpu=use_multi_gpu, model=eval_model, ckpt_path=current_process_ckpt_path,
+                           local_rank=target_device)
             logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
-            model_eval(eval_model, dev_loader, 'dev', epoch, classify_slot_index_value_dict, local_rank)
+            model_eval(eval_model, dev_loader, 'dev', epoch, classify_slot_index_value_dict, target_device)
             logger.info('start evaluation in test dataset, epoch: {}'.format(epoch))
-            model_eval(eval_model, test_loader, 'test', epoch, classify_slot_index_value_dict, local_rank)
+            model_eval(eval_model, test_loader, 'test', epoch, classify_slot_index_value_dict, target_device)
         if use_multi_gpu:
             torch.distributed.barrier()
 
@@ -132,11 +145,12 @@ def load_model(multi_gpu, model, ckpt_path, local_rank=None):
         new_state_dict = OrderedDict()
         for key in state_dict:
             if 'module.' in key:
-                new_state_dict[key] = state_dict[key]
+                new_state_dict[key.replace('module.', '')] = state_dict[key]
             else:
-                new_state_dict['module.'+key] = state_dict[key]
-        model.load_state_dict(state_dict)
+                new_state_dict[key] = state_dict[key]
+        model.load_state_dict(new_state_dict)
     else:
+        assert local_rank is None
         state_dict = torch.load(ckpt_path, map_location=torch.device(DEVICE))
         new_state_dict = OrderedDict()
         for key in state_dict:
@@ -148,18 +162,18 @@ def load_model(multi_gpu, model, ckpt_path, local_rank=None):
     logger.info('load model success')
 
 
-def data_device_alignment(batch):
+def data_device_alignment(batch, target_device):
     batch = list(batch)
     # 0 sample id, 1 active domain, 2 active slot, 3 context, 4 context mask, 5 true label, 6 hit type,
     # 7 mentioned_id, 8 hit value, 9 mentioned slot, 10 mentioned slot mask
-    batch[1] = batch[1].to(DEVICE)
-    batch[2] = batch[2].to(DEVICE)
-    batch[3] = batch[3].to(DEVICE)
-    batch[4] = batch[4].to(DEVICE)
+    batch[1] = batch[1].to(target_device)
+    batch[2] = batch[2].to(target_device)
+    batch[3] = batch[3].to(target_device)
+    batch[4] = batch[4].to(target_device)
     for key in batch[5]:
-        batch[6][key] = batch[6][key].to(DEVICE)
-        batch[7][key] = batch[7][key].to(DEVICE)
-        batch[10][key] = batch[10][key].to(DEVICE)
+        batch[6][key] = batch[6][key].to(target_device)
+        batch[7][key] = batch[7][key].to(target_device)
+        batch[10][key] = batch[10][key].to(target_device)
     return batch
 
 
@@ -219,25 +233,37 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
     # eval的特点在于data_loader顺序采样
     model.eval()
     result_list = []
-    last_mentioned_slot_dict, last_mentioned_mask_dict, last_sample_id = {}, {}, ''
+    last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict, last_sample_id = {}, {}, {}, ''
     for domain_slot in domain_slot_list:
-        last_mentioned_slot_dict[domain_slot] = [[[3], [3], [3], [3], [3]] for _ in range(mentioned_slot_pool_size)]
-        last_mentioned_mask_dict[domain_slot] = [1] + (mentioned_slot_pool_size - 1) * [0]
+        last_mentioned_slot_dict[domain_slot] = [[[1], [1], [1], [1], [1]] for _ in range(mentioned_slot_pool_size)]
+        last_mentioned_mask_dict[domain_slot] = [True] + (mentioned_slot_pool_size - 1) * [False]
+        last_str_mentioned_slot_dict[domain_slot] = \
+            [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'] for _ in range(mentioned_slot_pool_size)]
     with torch.no_grad():
         if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
             for batch in tqdm(data_loader):
                 if not use_multi_gpu:
-                    batch = data_device_alignment(batch)
+                    batch = data_device_alignment(batch, DEVICE)
+                else:
+                    batch = data_device_alignment(batch, local_rank)
+                # 因为模型的设置原因，测试阶段batch长度必须为1，不能像Trippy一样做batch测试
+                # 在测试时，需要将batch中的mentioned slots真值替换为为模型预测值，以确保测试公平性，也即是替换batch中的9,10,11项
+                assert len(batch[0]) == 1
+                for domain_slot in domain_slot_list:
+                    if not use_multi_gpu:
+                        batch[10][domain_slot] = BoolTensor([last_mentioned_mask_dict[domain_slot]]).to(DEVICE)
+                    else:
+                        batch[10][domain_slot] = BoolTensor([last_mentioned_mask_dict[domain_slot]]).to(local_rank)
+                    batch[11][domain_slot] = [last_str_mentioned_slot_dict[domain_slot]]
 
                 predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict = model(batch)
-                batch_predict_label_dict, last_sample_id, last_mentioned_slot_dict, last_mentioned_mask_dict = \
-                    evaluation_test_batch_eval(predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict,
-                                               batch, classify_slot_index_value_dict, last_mentioned_slot_dict,
-                                               last_sample_id, last_mentioned_mask_dict)
+                batch_predict_label_dict, last_sample_id, last_mentioned_slot_dict, last_mentioned_mask_dict, \
+                    last_str_mentioned_slot_dict = evaluation_test_eval(
+                        predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict, batch,
+                        classify_slot_index_value_dict, last_mentioned_slot_dict, last_sample_id,
+                        last_mentioned_mask_dict, last_str_mentioned_slot_dict)
                 result_list.append(batch_eval(batch_predict_label_dict, batch))
             result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
-    if use_multi_gpu:
-        torch.distributed.barrier()
     logger.info('model eval, data: {}, epoch: {} finished'.format(data_type, epoch))
 
 
@@ -263,9 +289,9 @@ def single_gpu_main(pass_info):
     model = HistorySelectionModel(name, pretrained_model, classify_slot_value_index_dict)
     model = model.cuda(DEVICE)
     # 注意，这一步必须在模型置cuda后手工立即进行
-    model.get_common_token_embedding()
-    if os.path.exists(load_ckpt_path):
-        load_model(use_multi_gpu, model, load_ckpt_path)
+    model.get_common_token_embedding(classify_slot_value_index_dict)
+    if os.path.exists(predefined_ckpt_path):
+        load_model(use_multi_gpu, model, predefined_ckpt_path)
     train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
           classify_slot_value_index_dict)
 
@@ -287,13 +313,13 @@ def multi_gpu_main(local_rank, _, pass_info):
     model = HistorySelectionModel(name, pretrained_model, classify_slot_value_index_dict, local_rank)
     model = model.cuda(local_rank)  # 将模型拷贝到每个gpu上
     # 注意，这一步必须在模型置cuda后手工立即进行
-    model.get_common_token_embedding()
+    model.get_common_token_embedding(classify_slot_value_index_dict)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank,
                                                       find_unused_parameters=True)
 
-    if os.path.exists(load_ckpt_path):
-        load_model(use_multi_gpu, model, load_ckpt_path, local_rank)
+    if os.path.exists(predefined_ckpt_path):
+        load_model(use_multi_gpu, model, predefined_ckpt_path, local_rank)
 
     train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
           classify_slot_value_index_dict, local_rank)

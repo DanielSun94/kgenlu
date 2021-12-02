@@ -9,12 +9,12 @@ if config_name == 'roberta':
     config = {
         'load_ckpt_path': '',  # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1_9.ckpt'),  #  ''
         'start_epoch': 0,  # = 0
-        'process_name': 'no2-history-selection',
+        'process_name': 'no1-history-selection',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta-large',
         'max_length': 512,
-        'batch_size': 8,
+        'batch_size': 10,
         'epoch': 10,
         'train_data_fraction': 0.001,
         'encoder_d_model': 1024,
@@ -32,7 +32,7 @@ if config_name == 'roberta':
         'overwrite_cache': False,
         'use_label_variant': True,
         'mode': 'train',  # train, eval
-        'lock_embedding_parameter': True,
+        'lock_embedding_parameter': False,
         'mentioned_slot_pool_size': 12
     }
 else:

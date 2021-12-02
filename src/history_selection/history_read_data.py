@@ -90,8 +90,8 @@ def prepare_data(overwrite):
     train_sampler = DistributedSampler(train_data) if use_multiple_gpu else RandomSampler(train_data)
     train_loader = DataLoader(train_data, sampler=train_sampler, batch_size=args['batch_size'],
                               collate_fn=collate_fn)
-    dev_loader = DataLoader(dev_data, sampler=dev_sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
-    test_loader = DataLoader(test_data, sampler=test_sampler, batch_size=args['batch_size'], collate_fn=collate_fn)
+    dev_loader = DataLoader(dev_data, sampler=dev_sampler, batch_size=1, collate_fn=collate_fn)
+    test_loader = DataLoader(test_data, sampler=test_sampler, batch_size=1, collate_fn=collate_fn)
     return classify_slot_value_index_dict, classify_slot_index_value_dict, train_loader, dev_loader, test_loader
 
 
@@ -103,7 +103,8 @@ def construct_dataloader(processed_data, data_type):
     context_list = [item.context for item in processed_data]
     context_mask_list = [item.context_mask for item in processed_data]
     label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict, \
-        possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict = {}, {}, {}, {}, {}, {}
+        possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict, \
+        str_possible_mentioned_slot_list_dict = {}, {}, {}, {}, {}, {}, {}
     for domain_slot in domain_slot_list:
         label_list_dict[domain_slot] = [item.label[domain_slot] for item in processed_data]
         hit_type_list_dict[domain_slot] = [item.hit_type[domain_slot] for item in processed_data]
@@ -111,8 +112,10 @@ def construct_dataloader(processed_data, data_type):
         hit_value_list_dict[domain_slot] = [item.hit_value[domain_slot] for item in processed_data]
         possible_mentioned_slot_list_dict[domain_slot] = \
             [item.possible_mentioned_slot_list[domain_slot] for item in processed_data]
-        possible_mentioned_slot_list_mask_dict[domain_slot]= \
+        possible_mentioned_slot_list_mask_dict[domain_slot] = \
             [item.possible_mentioned_slot_list_mask[domain_slot] for item in processed_data]
+        str_possible_mentioned_slot_list_dict[domain_slot] = \
+            [item.possible_mentioned_slot_str_list[domain_slot] for item in processed_data]
 
     # 此处由于train可以默认为知道上一轮结果真值，因此可以shuffle。而dev和test不知道，需要依赖预测进行判断，因此dev和test不可乱序
     if data_type == 'train':
@@ -120,8 +123,8 @@ def construct_dataloader(processed_data, data_type):
         random.shuffle(idx_list)
         new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list, new_context_mask_list, \
             new_label_list_dict, new_hit_type_list_dict, new_mentioned_idx_list_dict, new_hit_value_list_dict, \
-            new_possible_mentioned_slot_list_dict, new_possible_mentioned_slot_list_mask_dict = \
-            [], [], [], [], [], {}, {}, {}, {}, {}, {}
+            new_possible_mentioned_slot_list_dict, new_possible_mentioned_slot_list_mask_dict, \
+            new_str_possible_mentioned_slot_list_dict = [], [], [], [], [], {}, {}, {}, {}, {}, {}, {}
         for domain_slot in domain_slot_list:
             new_label_list_dict[domain_slot] = []
             new_hit_type_list_dict[domain_slot] = []
@@ -129,6 +132,7 @@ def construct_dataloader(processed_data, data_type):
             new_hit_value_list_dict[domain_slot] = []
             new_possible_mentioned_slot_list_dict[domain_slot] = []
             new_possible_mentioned_slot_list_mask_dict[domain_slot] = []
+            new_str_possible_mentioned_slot_list_dict[domain_slot] = []
         for idx in idx_list:
             new_sample_id_list.append(sample_id_list[idx])
             new_active_domain_list.append(active_domain_list[idx])
@@ -144,22 +148,26 @@ def construct_dataloader(processed_data, data_type):
                     append(possible_mentioned_slot_list_dict[domain_slot][idx])
                 new_possible_mentioned_slot_list_mask_dict[domain_slot].\
                     append(possible_mentioned_slot_list_mask_dict[domain_slot][idx])
+                new_str_possible_mentioned_slot_list_dict[domain_slot].\
+                    append(str_possible_mentioned_slot_list_dict[domain_slot][idx])
         dataset = \
             SampleDataset(new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list,
                           new_context_mask_list, new_label_list_dict, new_hit_type_list_dict,
                           new_mentioned_idx_list_dict, new_hit_value_list_dict, new_possible_mentioned_slot_list_dict,
-                          new_possible_mentioned_slot_list_mask_dict)
+                          new_possible_mentioned_slot_list_mask_dict, new_str_possible_mentioned_slot_list_dict)
     else:
         dataset = SampleDataset(sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list,
                                 label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict,
-                                possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict)
+                                possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict,
+                                str_possible_mentioned_slot_list_dict)
     return dataset
 
 
 class SampleDataset(Dataset):
     def __init__(self, sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list,
                  label_list_dict, hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict,
-                 possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict):
+                 possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict,
+                 str_possible_mentioned_slot_list_dict):
         self.sample_id_list = sample_id_list
         self.active_domain_list = active_domain_list
         self.active_slot_list = active_slot_list
@@ -171,6 +179,7 @@ class SampleDataset(Dataset):
         self.hit_value_list_dict = hit_value_list_dict
         self.possible_mentioned_slot_list_dict = possible_mentioned_slot_list_dict
         self.possible_mentioned_slot_list_mask_dict = possible_mentioned_slot_list_mask_dict
+        self.str_possible_mentioned_slot_list_dict = str_possible_mentioned_slot_list_dict
 
     def __getitem__(self, index):
         sample_id = self.sample_id_list[index]
@@ -179,7 +188,7 @@ class SampleDataset(Dataset):
         context = self.context_list[index]
         context_mask = self.context_mask_list[index]
         hit_type_dict, hit_value_dict, label_dict, mentioned_idx_dict, possible_mentioned_slot_list_dict, \
-            possible_mentioned_slot_list_mask_dict = {}, {}, {}, {}, {}, {}
+            possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_dict = {}, {}, {}, {}, {}, {}, {}
         for domain_slot in domain_slot_list:
             hit_type_dict[domain_slot] = self.hit_type_list_dict[domain_slot][index]
             hit_value_dict[domain_slot] = self.hit_value_list_dict[domain_slot][index]
@@ -188,9 +197,11 @@ class SampleDataset(Dataset):
             possible_mentioned_slot_list_dict[domain_slot] = self.possible_mentioned_slot_list_dict[domain_slot][index]
             possible_mentioned_slot_list_mask_dict[domain_slot] = \
                 self.possible_mentioned_slot_list_mask_dict[domain_slot][index]
+            str_possible_mentioned_slot_list_dict[domain_slot] = \
+                self.str_possible_mentioned_slot_list_dict[domain_slot][index]
         return sample_id, active_domain, active_slot, context, context_mask, label_dict, hit_type_dict, \
             mentioned_idx_dict, hit_value_dict, possible_mentioned_slot_list_dict, \
-            possible_mentioned_slot_list_mask_dict
+            possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_dict
 
     def get_fraction_data(self, fraction):
         assert isinstance(fraction, float) and 0.001 <= fraction <= 1.0
@@ -201,7 +212,8 @@ class SampleDataset(Dataset):
         new_context_list = self.context_list[: new_len]
         new_context_mask_list = self.context_mask_list[: new_len]
         new_hit_type_list_dict, new_hit_value_list_dict, new_label_list_dict, new_mentioned_idx_list_dict, \
-            new_possible_mentioned_slot_list_dict, new_possible_mentioned_slot_list_mask_dict = {}, {}, {}, {}, {}, {}
+            new_possible_mentioned_slot_list_dict, new_possible_mentioned_slot_list_mask_dict, \
+            new_str_possible_mentioned_slot_list_dict = {}, {}, {}, {}, {}, {}, {}
         for domain_slot in domain_slot_list:
             new_hit_type_list_dict[domain_slot] = self.hit_type_list_dict[domain_slot][: new_len]
             new_hit_value_list_dict[domain_slot] = self.hit_value_list_dict[domain_slot][: new_len]
@@ -211,10 +223,12 @@ class SampleDataset(Dataset):
                 self.possible_mentioned_slot_list_dict[domain_slot][: new_len]
             new_possible_mentioned_slot_list_mask_dict[domain_slot] = \
                 self.possible_mentioned_slot_list_mask_dict[domain_slot][: new_len]
+            new_str_possible_mentioned_slot_list_dict[domain_slot] = \
+                self.str_possible_mentioned_slot_list_dict[domain_slot][: new_len]
         return new_sample_id_list, new_active_domain_list, new_active_slot_list, new_context_list, \
             new_context_mask_list, new_label_list_dict, new_hit_type_list_dict, \
             new_mentioned_idx_list_dict, new_hit_value_list_dict, new_possible_mentioned_slot_list_dict,\
-            new_possible_mentioned_slot_list_mask_dict
+            new_possible_mentioned_slot_list_mask_dict, new_str_possible_mentioned_slot_list_dict
 
     def __len__(self):
         return len(self.sample_id_list)
@@ -223,7 +237,8 @@ class SampleDataset(Dataset):
 def collate_fn(batch):
     sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list, label_list_dict, \
         hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict, possible_mentioned_slot_list_dict, \
-        possible_mentioned_slot_list_mask_dict = [], [], [], [], [], {}, {}, {}, {}, {}, {}
+        possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_dict = \
+        [], [], [], [], [], {}, {}, {}, {}, {}, {}, {}
     for domain_slot in domain_slot_list:
         label_list_dict[domain_slot] = []
         hit_type_list_dict[domain_slot] = []
@@ -231,6 +246,7 @@ def collate_fn(batch):
         mentioned_idx_list_dict[domain_slot] = []
         possible_mentioned_slot_list_dict[domain_slot] = []
         possible_mentioned_slot_list_mask_dict[domain_slot] = []
+        str_possible_mentioned_slot_list_dict[domain_slot] = []
     for sample in batch:
         sample_id_list.append(sample[0])
         active_domain_list.append(sample[1])
@@ -244,6 +260,7 @@ def collate_fn(batch):
             hit_value_list_dict[domain_slot].append(sample[8][domain_slot])
             possible_mentioned_slot_list_dict[domain_slot].append(sample[9][domain_slot])
             possible_mentioned_slot_list_mask_dict[domain_slot].append(sample[10][domain_slot])
+            str_possible_mentioned_slot_list_dict[domain_slot].append(sample[11][domain_slot])
 
     active_domain_list = torch.FloatTensor(active_domain_list)
     active_slot_list = torch.FloatTensor(active_slot_list)
@@ -257,7 +274,7 @@ def collate_fn(batch):
             torch.BoolTensor(possible_mentioned_slot_list_mask_dict[domain_slot])
     return sample_id_list, active_domain_list, active_slot_list, context_list, context_mask_list, label_list_dict, \
         hit_type_list_dict, mentioned_idx_list_dict, hit_value_list_dict, possible_mentioned_slot_list_dict, \
-        possible_mentioned_slot_list_mask_dict
+        possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_dict
 
 
 def process_data(idx_list, dialogue_dict, act, data_type, classify_slot_value_index_dict):
@@ -345,22 +362,26 @@ def state_structurize(state, context_label_dict, classify_slot_value_index_dict)
         class_type = state[domain_slot]['class_type']
         classify_value_index = state[domain_slot]['classify_value']
         possible_mentioned_slot_list = state[domain_slot]['possible_mentioned_slot_list']
-        tokenized_possible_mentioned_slot_list = [[[3], [3], [3], [3], [3]]]
+        tokenized_possible_mentioned_slot_list = [[[1], [1], [1], [1], [1]]]
+        str_possible_mentioned_slot_list = [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>']]
 
         for mentioned_slot in possible_mentioned_slot_list:
             turn_idx, mentioned_type, domain, slot, value = mentioned_slot.split('$')
+            assert 'book' not in slot
             turn_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + turn_idx))
             domain_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + domain))
-            slot_id = tokenizer.convert_tokens_to_ids((tokenizer.tokenize(" " + slot.replace('book-', ''))))
+            slot_id = tokenizer.convert_tokens_to_ids((tokenizer.tokenize(" " + slot)))
             value_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + value))
             mentioned_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + mentioned_type))
             tokenized_possible_mentioned_slot_list.append([turn_id, domain_id, slot_id, value_id, mentioned_id])
+            str_possible_mentioned_slot_list.append([turn_idx, domain, slot, value, mentioned_type])
         list_length = len(tokenized_possible_mentioned_slot_list)
         # 同一场长度，使得后期的工作可以向量化处理
         assert list_length <= max_slot_pool_len
         mentioned_slot_list_mask = list_length*[1] + (max_slot_pool_len-list_length)*[0]
         for i in range(max_slot_pool_len-list_length):
-            tokenized_possible_mentioned_slot_list.append([[3], [3], [3], [3], [3]])
+            tokenized_possible_mentioned_slot_list.append([[1], [1], [1], [1], [1]])
+            str_possible_mentioned_slot_list.append(['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'])
 
         # initialize
         if no_value_assign_strategy == 'miss':
@@ -403,6 +424,7 @@ def state_structurize(state, context_label_dict, classify_slot_value_index_dict)
         reorganized_state[domain_slot]['mentioned_idx'] = mentioned_idx
         reorganized_state[domain_slot]['possible_mentioned_slot_list'] = tokenized_possible_mentioned_slot_list
         reorganized_state[domain_slot]['possible_mentioned_slot_list_mask'] = mentioned_slot_list_mask
+        reorganized_state[domain_slot]['str_possible_mentioned_slot_list'] = str_possible_mentioned_slot_list
     return reorganized_state
 
 
@@ -422,6 +444,8 @@ def irrelevant_domain_label_mask(turn_state, interest_domain):
                 turn_state[domain_slot]['possible_mentioned_slot_list']
             filtered_turn_state[domain_slot]['possible_mentioned_slot_list_mask'] = \
                 turn_state[domain_slot]['possible_mentioned_slot_list_mask']
+            filtered_turn_state[domain_slot]['str_possible_mentioned_slot_list'] = \
+                turn_state[domain_slot]['str_possible_mentioned_slot_list']
         else:
             filtered_turn_state[domain_slot]['hit_type'] = turn_state[domain_slot]['hit_type']
             filtered_turn_state[domain_slot]['mentioned_idx'] = turn_state[domain_slot]['mentioned_idx']
@@ -430,6 +454,8 @@ def irrelevant_domain_label_mask(turn_state, interest_domain):
                 turn_state[domain_slot]['possible_mentioned_slot_list']
             filtered_turn_state[domain_slot]['possible_mentioned_slot_list_mask'] = \
                 turn_state[domain_slot]['possible_mentioned_slot_list_mask']
+            filtered_turn_state[domain_slot]['str_possible_mentioned_slot_list'] = \
+                turn_state[domain_slot]['str_possible_mentioned_slot_list']
     return filtered_turn_state
 
 
@@ -441,7 +467,8 @@ class DataSample(object):
         self.context = context
         self.context_mask = context_mask
         self.label, self.hit_type, self.mentioned_idx, self.hit_value = {}, {}, {}, {}
-        self.possible_mentioned_slot_list, self.possible_mentioned_slot_list_mask = {}, {}
+        self.possible_mentioned_slot_list, self.possible_mentioned_slot_list_mask, \
+            self.possible_mentioned_slot_str_list = {}, {}, {}
         for domain_slot in domain_slot_list:
             self.label[domain_slot] = label[domain_slot]
             self.hit_type[domain_slot] = filtered_state[domain_slot]['hit_type']
@@ -450,6 +477,8 @@ class DataSample(object):
             self.possible_mentioned_slot_list[domain_slot] = filtered_state[domain_slot]['possible_mentioned_slot_list']
             self.possible_mentioned_slot_list_mask[domain_slot] = \
                 filtered_state[domain_slot]['possible_mentioned_slot_list_mask']
+            self.possible_mentioned_slot_str_list[domain_slot] = \
+                filtered_state[domain_slot]['str_possible_mentioned_slot_list']
 
 
 def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, classify_slot_value_index_dict):
@@ -492,7 +521,7 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, clas
         # mention slot set包含上一轮的mentioned slot与本轮提到的slots
         for domain_slot in domain_slot_list:
             split_idx = domain_slot.find('-')
-            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:]
+            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
             inform_label = inform_info[domain_slot] if domain_slot in inform_info else 'none'
             if inform_label != 'none':
                 mentioned_slot_set.add(str(turn_idx)+'$inform$'+domain+'$'+slot+'$'+inform_label)
@@ -506,7 +535,7 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, clas
             reorganize_data[turn_idx]['state'][domain_slot] = {}
             value_label = labels[domain_slot]
             split_idx = domain_slot.find('-')
-            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:]
+            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
 
             class_type, mentioned_slot, possible_mentioned_slot_list, utterance_token_label, value_index = \
                 get_turn_label(value_label, context_utterance_token, domain_slot, mentioned_slot_set,
@@ -1060,7 +1089,7 @@ def alignment_and_truncate(context_utterance_token_id, context_utterance_token_m
         context_mask = [1 for _ in range(max_input_length)]
     else:
         padding_num = max_input_length - len(context_utterance_token_id)
-        padding_token = tokenizer.convert_tokens_to_ids([' '+PAD_token])
+        padding_token = tokenizer.convert_tokens_to_ids([PAD_token])
         context_mask = [0] * len(context_utterance_token_id) + [1] * padding_num
         context_utterance_token = context_utterance_token_id + padding_token * padding_num
         for domain_slot in domain_slot_list:
@@ -1085,6 +1114,8 @@ def classify_slot_value_indexing(data_dict):
                 if domain_slot_type_map[domain_slot] != 'classify':
                     continue
                 classify_value = state_dict[domain_slot]
+                # 归一化，与后期步骤统一
+                classify_value = normalize_label(domain_slot, classify_value)
                 if classify_value == 'none' or classify_value == 'dontcare' or \
                         classify_value in classify_slot_value_index_dict[domain_slot]:
                     continue

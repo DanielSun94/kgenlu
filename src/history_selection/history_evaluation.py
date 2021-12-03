@@ -6,6 +6,7 @@ from history_read_data import domain_slot_type_map, tokenizer, domain_slot_list,
 
 use_variant = args['use_label_variant']
 mentioned_slot_pool_size = args['mentioned_slot_pool_size']
+id_cache_dict = {}
 
 
 def batch_eval(batch_predict_label_dict, batch):
@@ -136,18 +137,7 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
         predict_mentioned_slot_dict[domain_slot] = predict_mentioned_slot_dict[domain_slot].cpu().detach().numpy()
 
     # 由于规定了batch 长度为1，因此此处batch中无需做循环遍历，直接index取0即可
-    current_sample_id = batch[0][0].lower().split('.json')[0].strip()
     current_turn_index = str(int(batch[0][0].lower().split('.json-')[1].strip()))
-    if current_sample_id != last_sample_id:
-        last_sample_id = current_sample_id
-        last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict = {}, {}, {}
-        for domain_slot in domain_slot_list:
-            last_mentioned_slot_dict[domain_slot] = [[[1], [1], [1], [1], [1]] for _ in
-                                                     range(mentioned_slot_pool_size)]
-            last_mentioned_mask_dict[domain_slot] = [True] + (mentioned_slot_pool_size - 1) * [False]
-            last_str_mentioned_slot_dict[domain_slot] = \
-                [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'] for _ in range(mentioned_slot_pool_size)]
-
     for domain_slot in domain_slot_list:
         utterance = batch[3][0]
         predict_hit_type_one_slot = predict_gate_dict[domain_slot][0]
@@ -165,7 +155,6 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
             end_idx_predict = int(np.argmax(predict_value_one_slot[:, 1]))
             hit_value_predict = [start_idx_predict, end_idx_predict]
 
-        # TODO 这里的结果好像有一丢丢小问题，这里要探索一下predicted value的计算机制会不会有毛病
         predicted_value = predict_label_reconstruct(utterance, last_mentioned_slot, hit_type_predict,
                                                     predicted_mentioned_slot_idx, hit_value_predict, domain_slot,
                                                     classify_slot_index_value_dict)
@@ -179,7 +168,9 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
 
 def mentioned_slot_update(current_turn_index, predict_label_dict, last_mentioned_slot_dict, last_mentioned_mask_dict,
                           last_str_mentioned_slot_dict):
-    skip_value = {'<pad>'}  # 注意，此处我们把dontcare和none也算作有效值
+    # 注意，none, dontcare和<pad>哪怕预测到了，我们也不做mentioned slot看
+    # 这一设定与预处理时一致
+    skip_value = {'<pad>', 'dontcare', 'none'}
     updated_mentioned_slot_dict, updated_mentioned_mask_dict, updated_str_mentioned_slot_dict = {}, {}, {}
     for domain_slot in domain_slot_list:
         updated_mentioned_slot_dict[domain_slot] = \
@@ -195,11 +186,11 @@ def mentioned_slot_update(current_turn_index, predict_label_dict, last_mentioned
         split_idx = domain_slot.find('-')
         domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
         if predicted_value not in skip_value:
-            turn_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(' '+current_turn_index))
-            domain_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + domain))
-            slot_id = tokenizer.convert_tokens_to_ids((tokenizer.tokenize(" " + slot)))
-            value_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + predicted_value))
-            mentioned_id = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" label"))
+            turn_id = get_str_id(current_turn_index)
+            domain_id = get_str_id(domain)
+            slot_id = get_str_id(slot)
+            value_id = get_str_id(predicted_value)
+            mentioned_id = get_str_id('label')
             # 根据有效值进行替换
             updated_mentioned_slot_dict[domain_slot][length_dict[domain_slot]] = \
                 [turn_id, domain_id, slot_id, value_id, mentioned_id]
@@ -214,10 +205,11 @@ def mentioned_slot_update(current_turn_index, predict_label_dict, last_mentioned
         last_mentioned_mask = last_mentioned_mask_dict[domain_slot]
         last_mentioned_slot = last_mentioned_slot_dict[domain_slot]
         for (value_id, mask, str_value) in zip(last_mentioned_slot, last_mentioned_mask, last_str_mentioned_slot):
-            if str_value[0] != '<pad>':  # 如果id不为pad，则填入
+            if str_value[0] != '<pad>':  # 如果id不为pad(即该slot是真实存在的值而非填充值)，则填入
                 assert mask is True or mask is 1
                 valid_list.append([value_id, mask, str_value])
-        valid_list = sorted(valid_list, key=lambda x: int(x[2][0]))  # 按照规矩，此处的turn idx一定可以数值化
+        # 按照规矩，此处的turn idx一定可以数值化 x[2][0] 是turn idx
+        valid_list = sorted(valid_list, key=lambda x: int(x[2][0]))
         # 如果超限，则取最新的
         valid_list = valid_list if len(valid_list) <= mentioned_slot_pool_size-length_dict[domain_slot] else \
             valid_list[-(mentioned_slot_pool_size-length_dict[domain_slot]):]
@@ -260,3 +252,12 @@ def predict_label_reconstruct(utterance, mentioned_slots, predict_hit_type, pred
     else:
         raise ValueError('invalid value')
     return reconstructed_label
+
+
+def get_str_id(string):
+    if string in id_cache_dict:
+        return id_cache_dict[string].copy()
+    else:
+        token_id_list = tokenizer.convert_tokens_to_ids(tokenizer.tokenize(" " + string))
+        id_cache_dict[string] = token_id_list.copy()
+        return id_cache_dict[string].copy()

@@ -11,7 +11,6 @@ from tqdm import tqdm
 from collections import OrderedDict
 from history_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
     evaluation_test_eval
-import torch.distributed as dist
 from transformers import get_linear_schedule_with_warmup, AdamW
 
 
@@ -27,6 +26,12 @@ lr = args['learning_rate']
 adam_epsilon = args['adam_epsilon']
 max_grad_norm = args['max_grad_norm']
 mentioned_slot_pool_size = args['mentioned_slot_pool_size']
+pretrained_model = args['pretrained_model']
+gate_weight = float(args['gate_weight'])
+span_weight = float(args['span_weight'])
+classify_weight = float(args['classify_weight'])
+mentioned_weight = float(args['mentioned_weight'])
+weight_decay = args['weight_decay']
 
 
 def train(model, name, train_loader, dev_loader, test_loader, classify_slot_index_value_dict,
@@ -36,7 +41,7 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
     no_decay = ['bias', 'LayerNorm.weight']
     optimizer_grouped_parameters = [
         {'params': [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
-         'weight_decay': args['weight_decay']},
+         'weight_decay': weight_decay},
         {'params': [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
     ]
     optimizer = AdamW(optimizer_grouped_parameters, lr=lr, eps=adam_epsilon)
@@ -95,44 +100,51 @@ def train(model, name, train_loader, dev_loader, test_loader, classify_slot_inde
             if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
                 current_process_ckpt_path = ckpt_template.format(PROCESS_GLOBAL_NAME, epoch)
                 save_model(use_multi_gpu, model, current_process_ckpt_path, local_rank)
+            if use_multi_gpu:
+                torch.distributed.barrier()
 
-        # validation and test，此处因为原始数据判定的顺序问题，不可以使用distributed model，因此要重新载入
+        # validation and test，此处因为原始数据需要顺序输入，写多卡会非常麻烦，因此只使用单卡
         if (use_multi_gpu and local_rank == 0) or not use_multi_gpu:
             if use_multi_gpu:
                 assert local_rank is not None
+                rank = local_rank
                 target_device = local_rank
             else:
+                rank = None
                 target_device = DEVICE
 
             if mode != 'train':
                 assert current_process_ckpt_path is None and predefined_ckpt_path is not None
-                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict,
-                                                   local_rank=target_device)
+                eval_model = HistorySelectionModel(name, pretrained_model, classify_slot_value_index_dict,
+                                                   local_rank=rank)
                 eval_model = eval_model.cuda(target_device)
                 eval_model.get_common_token_embedding(classify_slot_value_index_dict)
                 load_model(multi_gpu=use_multi_gpu, model=eval_model, ckpt_path=predefined_ckpt_path,
-                           local_rank=target_device)
+                           local_rank=rank)
             else:
                 assert current_process_ckpt_path is not None
-                eval_model = HistorySelectionModel(name, args['pretrained_model'], classify_slot_value_index_dict,
-                                                   local_rank=target_device)
+                eval_model = HistorySelectionModel(name, pretrained_model, classify_slot_value_index_dict,
+                                                   local_rank=rank)
                 eval_model = eval_model.cuda(target_device)
                 eval_model.get_common_token_embedding(classify_slot_value_index_dict)
                 load_model(multi_gpu=use_multi_gpu, model=eval_model, ckpt_path=current_process_ckpt_path,
-                           local_rank=target_device)
+                           local_rank=rank)
             logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
             model_eval(eval_model, dev_loader, 'dev', epoch, classify_slot_index_value_dict, target_device)
             logger.info('start evaluation in test dataset, epoch: {}'.format(epoch))
             model_eval(eval_model, test_loader, 'test', epoch, classify_slot_index_value_dict, target_device)
+
         if use_multi_gpu:
+            logger.info('epoch finished, process: {}, before barrier'.format(local_rank))
             torch.distributed.barrier()
+            logger.info('epoch finished, process: {}, after barrier'.format(local_rank))
 
 
 def save_model(multi_gpu, model, ckpt_path, local_rank=None):
     if multi_gpu:
         if local_rank == 0:
             torch.save(model.state_dict(), ckpt_path)
-        dist.barrier()
+        torch.distributed.barrier()
     else:
         torch.save(model.state_dict(), ckpt_path)
     logger.info('save model success')
@@ -186,10 +198,6 @@ def train_compute_loss_and_batch_eval(predict_gate_dict, predict_value_dict, pre
                                       classify_slot_index_value_dict, local_rank=None):
     # 0 sample id, 1 active domain, 2 active slot, 3 context, 4 context mask, 5 true label, 6 hit type,
     # 7 mentioned_id, 8 hit value, 9 mentioned slot, 10 mentioned slot mask
-    gate_weight = float(args['gate_weight'])
-    span_weight = float(args['span_weight'])
-    classify_weight = float(args['classify_weight'])
-    mentioned_weight = float(args['mentioned_weight'])
     batch_predict_label_dict = {}
     cross_entropy = nn.CrossEntropyLoss(ignore_index=-1).to(DEVICE)
     if local_rank is not None:
@@ -234,11 +242,6 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
     model.eval()
     result_list = []
     last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict, last_sample_id = {}, {}, {}, ''
-    for domain_slot in domain_slot_list:
-        last_mentioned_slot_dict[domain_slot] = [[[1], [1], [1], [1], [1]] for _ in range(mentioned_slot_pool_size)]
-        last_mentioned_mask_dict[domain_slot] = [True] + (mentioned_slot_pool_size - 1) * [False]
-        last_str_mentioned_slot_dict[domain_slot] = \
-            [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'] for _ in range(mentioned_slot_pool_size)]
     with torch.no_grad():
         if (use_multi_gpu and local_rank == 0) or (not use_multi_gpu):
             for batch in tqdm(data_loader):
@@ -246,6 +249,19 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
                     batch = data_device_alignment(batch, DEVICE)
                 else:
                     batch = data_device_alignment(batch, local_rank)
+
+                # 当id 更新时，需要提前重置last sample id
+                current_sample_id = batch[0][0].lower().split('.json')[0].strip()
+                if current_sample_id != last_sample_id:
+                    last_sample_id = current_sample_id
+                    last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict = {}, {}, {}
+                    for domain_slot in domain_slot_list:
+                        last_mentioned_slot_dict[domain_slot] = [[[1], [1], [1], [1], [1]] for _ in
+                                                                 range(mentioned_slot_pool_size)]
+                        last_mentioned_mask_dict[domain_slot] = [True] + (mentioned_slot_pool_size - 1) * [False]
+                        last_str_mentioned_slot_dict[domain_slot] = \
+                            [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'] for _ in range(mentioned_slot_pool_size)]
+
                 # 因为模型的设置原因，测试阶段batch长度必须为1，不能像Trippy一样做batch测试
                 # 在测试时，需要将batch中的mentioned slots真值替换为为模型预测值，以确保测试公平性，也即是替换batch中的9,10,11项
                 assert len(batch[0]) == 1
@@ -254,6 +270,7 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
                         batch[10][domain_slot] = BoolTensor([last_mentioned_mask_dict[domain_slot]]).to(DEVICE)
                     else:
                         batch[10][domain_slot] = BoolTensor([last_mentioned_mask_dict[domain_slot]]).to(local_rank)
+                    batch[9][domain_slot] = [last_mentioned_slot_dict[domain_slot]]
                     batch[11][domain_slot] = [last_str_mentioned_slot_dict[domain_slot]]
 
                 predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict = model(batch)
@@ -315,6 +332,7 @@ def multi_gpu_main(local_rank, _, pass_info):
     # 注意，这一步必须在模型置cuda后手工立即进行
     model.get_common_token_embedding(classify_slot_value_index_dict)
     model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+
     model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank,
                                                       find_unused_parameters=True)
 
@@ -326,7 +344,7 @@ def multi_gpu_main(local_rank, _, pass_info):
 
 
 def main():
-    pass_info = args['pretrained_model'], args['process_name']
+    pass_info = pretrained_model, PROCESS_GLOBAL_NAME
     logger.info('start training')
     if use_multi_gpu:
         num_gpu = torch.cuda.device_count()

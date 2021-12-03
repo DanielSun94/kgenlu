@@ -15,10 +15,10 @@ if config_name == 'roberta':
         'pretrained_model': 'roberta-large',
         'max_length': 512,
         'batch_size': 10,
-        'epoch': 10,
-        'train_data_fraction': 0.001,
+        'epoch': 20,
+        'data_fraction': 1,
         'encoder_d_model': 1024,
-        'learning_rate': 0.00001,
+        'learning_rate': 0.000005,
         'device': 'cuda:1',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
@@ -29,7 +29,7 @@ if config_name == 'roberta':
         'mentioned_weight': 0.2,
         'span_weight': 0.4,
         'classify_weight': 0.2,
-        'overwrite_cache': False,
+        'overwrite_cache': True,
         'use_label_variant': True,
         'mode': 'train',  # train, eval
         'lock_embedding_parameter': False,
@@ -57,7 +57,7 @@ parser.add_argument('--classify_weight', help='', default=config['classify_weigh
 parser.add_argument('--mentioned_weight', help='', default=config['mentioned_weight'])
 parser.add_argument('--delex_system_utterance', help='', default=config['delex_system_utterance'])
 parser.add_argument('--multi_gpu', help='', default=config['use_multi_gpu'])
-parser.add_argument('--train_data_fraction', help='', default=config['train_data_fraction'])
+parser.add_argument('--data_fraction', help='', default=config['data_fraction'])
 parser.add_argument('--epoch', help='', default=config['epoch'])
 parser.add_argument('--learning_rate', help='', default=config['learning_rate'])
 parser.add_argument('--encoder_d_model', help='', default=config['encoder_d_model'])

@@ -100,10 +100,10 @@ class HistorySelectionModel(Module):
         context token id shape [batch size, sequence length]
         """
         id_list, active_domain, active_slot, context_token = data[0], data[1], data[2], data[3]
-        context_mask, possible_mentioned_slot_list_dict = (1 - data[4].type(torch.uint8)), data[9]
-        possible_mentioned_slot_list_mask_dict, str_possible_mentioned_slot_list_mask_dict = data[10], data[11]
-        possible_mentioned_slot_list_dict = self.get_mentioned_slots_embedding(
-            possible_mentioned_slot_list_dict, str_possible_mentioned_slot_list_mask_dict)
+        context_mask, mentioned_slot_list_dict = (1 - data[4].type(torch.uint8)), data[9]
+        mentioned_slot_list_mask_dict, str_mentioned_slot_list_mask_dict = data[10], data[11]
+        mentioned_slot_list_dict = self.get_mentioned_slots_embedding(
+            mentioned_slot_list_dict, str_mentioned_slot_list_mask_dict)
 
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_value_dict = {}
@@ -117,9 +117,9 @@ class HistorySelectionModel(Module):
                 predict_value_dict[domain_slot] = weight(encode)
 
         predict_mentioned_slot_dict = self.predict_mentioned_slot_value(
-            encode[:, 0, :], possible_mentioned_slot_list_dict, possible_mentioned_slot_list_mask_dict)
-        predict_gate_dict = self.predict_gate_value(encode[:, 0, :], possible_mentioned_slot_list_dict,
-                                                    possible_mentioned_slot_list_mask_dict)
+            encode[:, 0, :], mentioned_slot_list_dict, mentioned_slot_list_mask_dict)
+        predict_gate_dict = self.predict_gate_value(encode[:, 0, :], mentioned_slot_list_dict,
+                                                    mentioned_slot_list_mask_dict)
 
         return predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict
 
@@ -148,16 +148,16 @@ class HistorySelectionModel(Module):
             gate_predict_dict[domain_slot] = self.gate_predict[domain_slot](embedding)
         return gate_predict_dict
 
-    def get_mentioned_slots_embedding(self, possible_mentioned_slot_list_dict, str_possible_mentioned_slot_list_dict):
+    def get_mentioned_slots_embedding(self, mentioned_slot_list_dict, str_mentioned_slot_list_dict):
         # mentioned slots embedding获取，因为数据本身并不齐整(主要是部分value可能一次解析出多个token id)，因此只能这么做
         target_id = self.target_id
         mentioned_slots_embedding_dict = {}
         for domain_slot in domain_slot_list:
             mentioned_slots_embedding_dict[domain_slot] = []
-            for sample_idx in range(len(possible_mentioned_slot_list_dict[domain_slot])):
+            for sample_idx in range(len(mentioned_slot_list_dict[domain_slot])):
                 sample_list = []
-                str_mentioned_slot_list = str_possible_mentioned_slot_list_dict[domain_slot][sample_idx]
-                mentioned_slot_list = possible_mentioned_slot_list_dict[domain_slot][sample_idx]
+                str_mentioned_slot_list = str_mentioned_slot_list_dict[domain_slot][sample_idx]
+                mentioned_slot_list = mentioned_slot_list_dict[domain_slot][sample_idx]
                 for mentioned_slot, str_mentioned_slot in zip(mentioned_slot_list, str_mentioned_slot_list):
                     # 按照正常情况，这些token一定能找到命中的值
                     turn = self.common_token_embedding_dict[str_mentioned_slot[0]]

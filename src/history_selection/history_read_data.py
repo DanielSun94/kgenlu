@@ -637,12 +637,20 @@ def check_mentioned_slot(value_label, mentioned_slot_set, domain_slot):
     # 符合参考范围的mentioned list，被称为possible_slot_list。然后会返回valid list中值相等的，且最合适的作为mentioned slot
     # 其中，所谓“最合适”指的是，如果valid list中只有一个满足label相等，则返回这个，如果有多个，则优先取后提到的，如果轮次也一样，
     # 取domain slot完全一致的
+    # 如果是inform，要保证参考domain slot完全一致，如果是label，只需近似许可（我们假设不会出现用户答非所问的情况）
     possible_slot_list, valid_list = [], []
     for mentioned_slot in mentioned_slot_set:
         turn_idx, mentioned_type, domain, source_slot, value = mentioned_slot.strip().split('$')
-        target_slot = domain_slot.split('-')[-1]
-        for item_set in MENTIONED_MAP_LIST:
-            if target_slot in item_set and source_slot in item_set:
+        target_domain, target_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+        if mentioned_type == 'label':
+            for item_set in MENTIONED_MAP_LIST:
+                if target_slot in item_set and source_slot in item_set:
+                    possible_slot_list.append(mentioned_slot)
+                    if approximate_equal_test(value_label, value, use_variant=variant_flag):
+                        valid_list.append([turn_idx, mentioned_type, domain, source_slot, value, mentioned_slot])
+        else:
+            assert mentioned_type == 'inform'
+            if target_slot == source_slot and target_domain == domain:
                 possible_slot_list.append(mentioned_slot)
                 if approximate_equal_test(value_label, value, use_variant=variant_flag):
                     valid_list.append([turn_idx, mentioned_type, domain, source_slot, value, mentioned_slot])

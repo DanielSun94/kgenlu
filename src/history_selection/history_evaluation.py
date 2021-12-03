@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import csv
-from history_config import args, result_template, evaluation_folder
+from history_config import args, result_template, MENTIONED_MAP_LIST
 from history_read_data import domain_slot_type_map, tokenizer, domain_slot_list, approximate_equal_test
 
 use_variant = args['use_label_variant']
@@ -161,13 +161,13 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
         batch_predict_label_dict[domain_slot].append(predicted_value)
     last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict = mentioned_slot_update(
         current_turn_index, batch_predict_label_dict, last_mentioned_slot_dict, last_mentioned_mask_dict,
-        last_str_mentioned_slot_dict)
+        last_str_mentioned_slot_dict, 'label')
     return batch_predict_label_dict, last_sample_id, last_mentioned_slot_dict, last_mentioned_mask_dict, \
         last_str_mentioned_slot_dict
 
 
-def mentioned_slot_update(current_turn_index, predict_label_dict, last_mentioned_slot_dict, last_mentioned_mask_dict,
-                          last_str_mentioned_slot_dict):
+def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_slot_dict, last_mentioned_mask_dict,
+                          last_str_mentioned_slot_dict, mentioned_type):
     # 注意，none, dontcare和<pad>哪怕预测到了，我们也不做mentioned slot看
     # 这一设定与预处理时一致
     skip_value = {'<pad>', 'dontcare', 'none'}
@@ -182,21 +182,25 @@ def mentioned_slot_update(current_turn_index, predict_label_dict, last_mentioned
     length_dict = {domain_slot: 1 for domain_slot in domain_slot_list}
 
     for domain_slot in domain_slot_list:  # 注意，此处要求
-        predicted_value = predict_label_dict[domain_slot][0]
+        predicted_value = update_label_dict[domain_slot][0]
         split_idx = domain_slot.find('-')
-        domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
+        source_domain, source_slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
         if predicted_value not in skip_value:
-            turn_id = get_str_id(current_turn_index)
-            domain_id = get_str_id(domain)
-            slot_id = get_str_id(slot)
-            value_id = get_str_id(predicted_value)
-            mentioned_id = get_str_id('label')
-            # 根据有效值进行替换
-            updated_mentioned_slot_dict[domain_slot][length_dict[domain_slot]] = \
-                [turn_id, domain_id, slot_id, value_id, mentioned_id]
-            updated_str_mentioned_slot_dict[domain_slot][length_dict[domain_slot]] = \
-                [current_turn_index, domain, slot, predicted_value, "label"]
-            length_dict[domain_slot] += 1
+            for domain_slot_target in domain_slot_list:
+                target_domain, target_slot = domain_slot_target.split('-')[0], domain_slot_target.split('-')[-1]
+                for item in MENTIONED_MAP_LIST:
+                    if target_slot in item and source_slot in item:
+                        turn_id = get_str_id(current_turn_index)
+                        domain_id = get_str_id(source_domain)
+                        slot_id = get_str_id(source_slot)
+                        value_id = get_str_id(predicted_value)
+                        mentioned_id = get_str_id(mentioned_type)
+                        # 根据有效值进行替换
+                        updated_mentioned_slot_dict[domain_slot][length_dict[domain_slot]] = \
+                            [turn_id, domain_id, slot_id, value_id, mentioned_id]
+                        updated_str_mentioned_slot_dict[domain_slot][length_dict[domain_slot]] = \
+                            [current_turn_index, source_domain, source_slot, predicted_value, "label"]
+                        length_dict[domain_slot] += 1
 
     # 然后按照降序填入最新的previous mentioned value
     for domain_slot in domain_slot_list:

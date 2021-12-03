@@ -3,14 +3,15 @@ from torch import BoolTensor, LongTensor
 import os
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from hisory_model import HistorySelectionModel
-from history_config import args, DEVICE, medium_result_template, evaluation_folder, ckpt_template, logger
+from history_config import args, DEVICE, medium_result_template, evaluation_folder, ckpt_template, logger, \
+    MENTIONED_MAP_LIST
 import pickle
 import torch.multiprocessing as mp
 from torch import nn
 from tqdm import tqdm
 from collections import OrderedDict
 from history_evaluation import reconstruct_batch_predict_label_train, batch_eval, comprehensive_eval,\
-    evaluation_test_eval
+    evaluation_test_eval, mentioned_slot_update
 from transformers import get_linear_schedule_with_warmup, AdamW
 
 
@@ -256,14 +257,15 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
                     last_sample_id = current_sample_id
                     last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict = {}, {}, {}
                     for domain_slot in domain_slot_list:
-                        last_mentioned_slot_dict[domain_slot] = [[[1], [1], [1], [1], [1]] for _ in
-                                                                 range(mentioned_slot_pool_size)]
+                        last_mentioned_slot_dict[domain_slot] = \
+                            [[[1], [1], [1], [1], [1]] for _ in range(mentioned_slot_pool_size)]
                         last_mentioned_mask_dict[domain_slot] = [True] + (mentioned_slot_pool_size - 1) * [False]
                         last_str_mentioned_slot_dict[domain_slot] = \
                             [['<pad>', '<pad>', '<pad>', '<pad>', '<pad>'] for _ in range(mentioned_slot_pool_size)]
 
-                # 因为模型的设置原因，测试阶段batch长度必须为1，不能像Trippy一样做batch测试
-                # 在测试时，需要将batch中的mentioned slots真值替换为为模型预测值，以确保测试公平性，也即是替换batch中的9,10,11项
+                last_mentioned_slot_dict, last_mentioned_mask_dict, last_str_mentioned_slot_dict = \
+                    inform_mentioned_slot_update(last_mentioned_slot_dict, last_mentioned_mask_dict,
+                                                 last_str_mentioned_slot_dict, batch)
                 assert len(batch[0]) == 1
                 for domain_slot in domain_slot_list:
                     if not use_multi_gpu:
@@ -282,6 +284,31 @@ def model_eval(model, data_loader, data_type, epoch, classify_slot_index_value_d
                 result_list.append(batch_eval(batch_predict_label_dict, batch))
             result_print(comprehensive_eval(result_list, data_type, PROCESS_GLOBAL_NAME, epoch))
     logger.info('model eval, data: {}, epoch: {} finished'.format(data_type, epoch))
+
+
+def inform_mentioned_slot_update(mentioned_slot_dict, mentioned_mask_dict, str_mentioned_slot_dict, batch):
+    # 因为模型的设置原因，测试阶段batch长度必须为1，不能像Trippy一样做batch测试
+    # 在测试时，需要将batch中的mentioned slots真值替换为为模型预测值，以确保测试公平性
+    # 即替换batch中的9,10,11项为上一轮的结果和本轮中inform真值，我们假定inform时不会存在slot传递这回事情。必须完全匹配。
+    # 我们可以假定inform最多inform一次
+    turn_idx = str(int(batch[0][0].split('-')[1]))
+    valid_idx_dict = {}
+    for domain_slot in domain_slot_list:
+        target_domain, target_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+        for index in range(len(batch[11][domain_slot][0])):
+            mentioned_slot = batch[11][domain_slot][0][index]
+            if mentioned_slot[4] == 'inform' and mentioned_slot[0] == turn_idx and mentioned_slot[1] == target_domain \
+                    and mentioned_slot[2] == target_slot:
+                valid_idx_dict[domain_slot] = index
+    inform_label_dict = {}
+    for domain_slot in domain_slot_list:
+        if domain_slot in valid_idx_dict:
+            inform_label_dict[domain_slot] = [batch[11][domain_slot][0][valid_idx_dict[domain_slot]][3]]
+
+    mentioned_slot_dict, mentioned_mask_dict, str_mentioned_slot_dict = mentioned_slot_update(
+        turn_idx, inform_label_dict, mentioned_slot_dict, mentioned_mask_dict,
+        str_mentioned_slot_dict, 'inform')
+    return mentioned_slot_dict, mentioned_mask_dict, str_mentioned_slot_dict
 
 
 def load_result_multi_gpu(data_type, epoch):

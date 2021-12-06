@@ -1,10 +1,9 @@
 import torch
 from torch import mean, cat, stack, LongTensor
-import numpy as np
 from tqdm import tqdm
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from history_config import args, logger, DEVICE
-from torch.nn import LSTM, ReLU, Linear, Sequential, Module, ModuleDict
+from torch.nn import ReLU, Linear, Sequential, Module, ModuleDict
 from transformers import RobertaModel
 from transformers import RobertaTokenizer
 
@@ -23,17 +22,14 @@ mentioned_slot_pool_size = args['mentioned_slot_pool_size']
 def unit_test():
     pretrained_model = args['pretrained_model']
     name = args['process_name']
-    classify_slot_value_index_dict, classify_slot_index_value_dict, train_loader, dev_loader, test_loader = \
+    slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader = \
         prepare_data(overwrite=overwrite_cache)
-    model = HistorySelectionModel(name, pretrained_model, classify_slot_value_index_dict)
-    model.train()
-    for batch_data in tqdm(train_loader):
-        model(batch_data)
+    _ = HistorySelectionModel(name, pretrained_model, slot_value_index_dict)
     logger.info('feed success')
 
 
 class HistorySelectionModel(Module):
-    def __init__(self, name, pretrained_model, classify_slot_value_index_dict, local_rank=None):
+    def __init__(self, name, pretrained_model, slot_value_index_dict, local_rank=None):
         super(HistorySelectionModel, self).__init__()
         self.name = name
         if use_multi_gpu:
@@ -43,7 +39,7 @@ class HistorySelectionModel(Module):
             self.target_id = DEVICE
         self.embedding_dim = args['encoder_d_model']
         self.encoder = PretrainedEncoder(pretrained_model)
-        self.classify_slot_value_index_dict = classify_slot_value_index_dict
+        self.slot_value_index_dict = slot_value_index_dict
         # Gate dict, 4 for none, dont care, mentioned, hit
         # 暂且不分domain slot specific的参数
         self.gate_predict = ModuleDict()
@@ -52,17 +48,17 @@ class HistorySelectionModel(Module):
             self.gate_predict[domain_slot] = Linear(self.embedding_dim, 4)
             if domain_slot_type_map[domain_slot] == 'classify':
                 if no_value_assign_strategy == 'miss':
-                    num_value = len(self.classify_slot_value_index_dict[domain_slot])
+                    num_value = len(self.slot_value_index_dict[domain_slot])
                 else:
-                    num_value = len(self.classify_slot_value_index_dict[domain_slot]) + 1
+                    num_value = len(self.slot_value_index_dict[domain_slot]) + 1
                 self.hit_parameter[domain_slot] = Linear(self.embedding_dim, num_value)
             elif domain_slot_type_map[domain_slot] == 'span':
                 self.hit_parameter[domain_slot] = Linear(self.embedding_dim, 2)
             else:
                 raise ValueError('Error Value')
         # m for mentioned slot
-        self.m_query_para = Sequential(Linear(self.embedding_dim, 32), ReLU(), Linear(32, 32), ReLU())
-        self.m_slot_para = Sequential(Linear(self.embedding_dim, 32), ReLU(), Linear(32, 32), ReLU())
+        self.m_query_para = Sequential(Linear(self.embedding_dim, 128), ReLU(), Linear(128, 32), ReLU())
+        self.m_slot_para = Sequential(Linear(self.embedding_dim, 128), ReLU(), Linear(128, 32), ReLU())
         self.m_combine_para = Linear(32, 32)
 
         # 是否锁定embedding的值
@@ -73,17 +69,16 @@ class HistorySelectionModel(Module):
         # 由于turn, domain, slot, mentioned type需要经常用到，因此构建一下这些常用策略的embedding
         self.common_token_embedding_dict = None
 
-    def get_common_token_embedding(self, classify_slot_value_index_dict):
+    def get_common_token_embedding(self, slot_value_index_dict):
         common_token_list, common_token_embedding_dict = ['label', 'inform', 'dontcare'], {}
         for i in range(0, 30):
             common_token_list.append(str(i))
         for domain_slot in domain_slot_list:
-            split_idx = domain_slot.find('-')
-            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
+            domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
             common_token_list.append(domain)
             common_token_list.append(slot)
-        for domain_slot in classify_slot_value_index_dict:
-            for value in classify_slot_value_index_dict[domain_slot]:
+        for domain_slot in slot_value_index_dict:
+            for value in slot_value_index_dict[domain_slot]:
                 common_token_list.append(value)
 
         for key in common_token_list:
@@ -99,11 +94,14 @@ class HistorySelectionModel(Module):
         """
         context token id shape [batch size, sequence length]
         """
+        if self.common_token_embedding_dict is None:
+            raise ValueError('')
+
         id_list, active_domain, active_slot, context_token = data[0], data[1], data[2], data[3]
-        context_mask, mentioned_slot_list_dict = (1 - data[4].type(torch.uint8)), data[9]
-        mentioned_slot_list_mask_dict, str_mentioned_slot_list_mask_dict = data[10], data[11]
-        mentioned_slot_list_dict = self.get_mentioned_slots_embedding(
-            mentioned_slot_list_dict, str_mentioned_slot_list_mask_dict)
+        context_mask, mentioned_slot_list_dict = data[4].type(torch.uint8), data[9]
+        mentioned_slot_list_mask_dict, str_mentioned_slot_list_dict = data[10], data[11]
+        mentioned_slot_embedding_list_dict = self.get_mentioned_slots_embedding(
+            mentioned_slot_list_dict, str_mentioned_slot_list_dict)
 
         encode = self.encoder(context_token, padding_mask=context_mask)
         predict_value_dict = {}
@@ -117,8 +115,8 @@ class HistorySelectionModel(Module):
                 predict_value_dict[domain_slot] = weight(encode)
 
         predict_mentioned_slot_dict = self.predict_mentioned_slot_value(
-            encode[:, 0, :], mentioned_slot_list_dict, mentioned_slot_list_mask_dict)
-        predict_gate_dict = self.predict_gate_value(encode[:, 0, :], mentioned_slot_list_dict,
+            encode[:, 0, :], mentioned_slot_embedding_list_dict, mentioned_slot_list_mask_dict)
+        predict_gate_dict = self.predict_gate_value(encode[:, 0, :], mentioned_slot_embedding_list_dict,
                                                     mentioned_slot_list_mask_dict)
 
         return predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict
@@ -126,8 +124,7 @@ class HistorySelectionModel(Module):
     def predict_mentioned_slot_value(self, context, mentioned_slots_embedding_dict, mentioned_slot_list_mask_dict):
         predict_mentioned_slot_dict = {}
         for domain_slot in domain_slot_list:
-            split_idx = domain_slot.find('-')
-            domain, slot = domain_slot[: split_idx], domain_slot[split_idx + 1:].replace('book-', '')
+            domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
             query = (self.common_token_embedding_dict[domain] + self.common_token_embedding_dict[slot])/2 + context/2
             query_weight = self.m_query_para(query).unsqueeze(dim=2)
             value_weight = self.m_slot_para(mentioned_slots_embedding_dict[domain_slot])
@@ -161,11 +158,11 @@ class HistorySelectionModel(Module):
                 for mentioned_slot, str_mentioned_slot in zip(mentioned_slot_list, str_mentioned_slot_list):
                     # 按照正常情况，这些token一定能找到命中的值
                     turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
-                    domain = self.common_token_embedding_dict[str_mentioned_slot[1]]
-                    slot = self.common_token_embedding_dict[str_mentioned_slot[2]]
-                    type_ = self.common_token_embedding_dict[str_mentioned_slot[4]]
-                    if str_mentioned_slot[3] in self.common_token_embedding_dict:
-                        value = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    mentioned_type = self.common_token_embedding_dict[str_mentioned_slot[1]]
+                    domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
+                    slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    if str_mentioned_slot[4] in self.common_token_embedding_dict:
+                        value = self.common_token_embedding_dict[str_mentioned_slot[4]]
                     else:
                         # 注意，此处的domain_slot和domain slot其实可能分指两个不同的domain-slot pair。但是根据我们的设计
                         # 根据domain_slot做mapping并不会导致classify判定出问题
@@ -175,7 +172,7 @@ class HistorySelectionModel(Module):
                         # if domain_slot_type_map[domain_slot] == 'classify' and \
                         #         str_mentioned_slot[3] not in self.common_token_embedding_dict:
                         #     assert str_mentioned_slot[4] == 'inform'
-                        value = mean(self.token_embedding(LongTensor(mentioned_slot[3]).to(target_id)), dim=0,
+                        value = mean(self.token_embedding(LongTensor(mentioned_slot[4]).to(target_id)), dim=0,
                                      keepdim=True)
 
                     # turn = mean(self.token_embedding(LongTensor(mentioned_slot[0]).to(target_id)),
@@ -188,7 +185,7 @@ class HistorySelectionModel(Module):
                     # keepdim=True)
                     # type_ = mean(self.token_embedding(LongTensor(mentioned_slot[4]).to(target_id)), dim=0,
                     # keepdim=True)
-                    sample_list.append(mean(cat((value, mean(cat((turn, domain, slot, type_), dim=0), dim=0,
+                    sample_list.append(mean(cat((value, mean(cat((turn, mentioned_type, domain, slot), dim=0), dim=0,
                                                              keepdim=True)), dim=0), dim=0, keepdim=True))
                 assert len(sample_list) == mentioned_slot_pool_size
                 mentioned_slots_embedding_dict[domain_slot].append(stack(sample_list))

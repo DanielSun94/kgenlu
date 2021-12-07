@@ -177,9 +177,9 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
 
     # 根据Update值设定candidate
     for domain_slot in domain_slot_list:
-        predicted_value = update_label_dict[domain_slot][0]
+        value = update_label_dict[domain_slot][0]
         source_domain, source_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
-        if predicted_value not in skip_value:
+        if value not in skip_value:
             for domain_slot_target in domain_slot_list:
                 target_domain, target_slot = domain_slot_target.split('-')[0], domain_slot_target.split('-')[-1]
                 add_flag = False
@@ -193,9 +193,8 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
                 else:
                     raise ValueError('')
                 if add_flag:
-                    candidate_str = str(
-                        current_turn_index) + '$' + mentioned_type + '$' + source_domain + '$' + source_slot + '$' + \
-                                    predicted_value
+                    candidate_str = str(current_turn_index)+'$'+mentioned_type+'$'+source_domain+'$'+source_slot+'$' + \
+                                    value
                     candidate_mentioned_slot_list_dict[domain_slot_target].add(candidate_str)
     # 然后按照降序填入最新的previous mentioned value
     for domain_slot in domain_slot_list:
@@ -213,7 +212,7 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
                     assert int(idx) <= int(current_turn_index)
                 candidate_str = str(idx) + '$' + mention_type + '$' + domain + '$' + slot + '$' + value
                 candidate_mentioned_slot_list_dict[domain_slot].add(candidate_str)
-    # 去重
+    # 去重。在mentioned type为label时，update label dict中应当存在相当一部分是继承的，这一些label需要去重
     for domain_slot in domain_slot_list:
         candidate_mentioned_slot_list_dict[domain_slot] = eliminate_replicate_mentioned_slot(
             candidate_mentioned_slot_list_dict[domain_slot])

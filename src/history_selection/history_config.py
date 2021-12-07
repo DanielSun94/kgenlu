@@ -15,11 +15,11 @@ if config_name == 'roberta':
         'pretrained_model': 'roberta-base',
         'max_length': 512,
         'batch_size': 32,
-        'epoch': 10,
-        'data_fraction': 1,
+        'epoch': 60,
+        'data_fraction': 0.01,
         'encoder_d_model': 768,
-        'learning_rate': 0.00001,
-        'device': 'cuda:1',
+        'learning_rate': 0.000005,
+        'device': 'cuda:0',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
         'use_multi_gpu': False,
@@ -32,7 +32,7 @@ if config_name == 'roberta':
         'overwrite_cache': False,
         'use_label_variant': True,
         'mode': 'train',  # train, eval
-        'lock_embedding_parameter': False,
+        'lock_embedding_parameter': True,
         'mentioned_slot_pool_size': 12
     }
 else:

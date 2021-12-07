@@ -215,8 +215,7 @@ def train_compute_loss_and_batch_eval(predict_gate_dict, predict_value_dict, pre
         label_value = train_batch[8][domain_slot].to(target_device)
         label_mentioned_slot = train_batch[7][domain_slot].to(target_device)
 
-        predict_dict[domain_slot] = reconstruct_prediction_train(
-            domain_slot, predict_hit_type, predict_value,
+        predict_dict[domain_slot] = reconstruct_prediction_train(domain_slot, predict_hit_type, predict_value,
             predict_mentioned_slot, train_batch, slot_index_value_dict)
 
         gate_loss += cross_entropy(predict_hit_type, label_hit_type)
@@ -249,7 +248,7 @@ def model_eval(model, data_loader, data_type, epoch, slot_index_value_dict, loca
             else:
                 batch = data_device_alignment(batch, local_rank)
 
-            # 当id 更新时，需要提前重置last sample id
+            # 当id 更新时，需要提前重置last sample id与相应的其他内容
             current_sample_id = batch[0][0].lower().split('.json')[0].strip()
             if current_sample_id != last_sample_id:
                 last_sample_id = current_sample_id
@@ -287,9 +286,10 @@ def model_eval(model, data_loader, data_type, epoch, slot_index_value_dict, loca
 def inform_mentioned_slot_update(mentioned_slot_dict, mentioned_mask_dict, str_mentioned_slot_dict, batch):
     # 此处的主要目标是建模inform的mentioned slot
     # 我们可以假定inform最多inform一次
-    # 即替换batch中的9,10,11项为上一轮的结果和本轮中inform真值，我们假定inform时不会存在slot传递这回事情。必须完全匹配。
-    # 这里的意思实际是，我们可以合理的利用当前轮次mentioned slot真值中所有的inform信息
-    # 我们这里只保留本轮的inform值，因为最近一轮的对话中系统不会同时给出两个inform，因此最后一次inform要不是本轮刚提出的
+    # 即替换batch中的9,10,11项为上一轮的结果和本轮中inform真值，我们假定inform时不会存在同类型slot传递这回事情
+    # （比如Inform了宾馆的地点结果用户说我选这个地方的饭店）。必须完全匹配。
+    # 由于我们知道系统的行为，因此，我们可以合理的利用当前轮次mentioned slot真值中所有的inform信息
+    # 我们这里只保留本轮的inform值，我们假定最近一轮的对话中系统不会同时给出两个inform，因此最后一次inform要不是本轮刚提出的
     # 要不就是之前的（会在Update时只取一次）
     turn_idx = str(int(batch[0][0].split('-')[1]))
     valid_idx_dict = {}

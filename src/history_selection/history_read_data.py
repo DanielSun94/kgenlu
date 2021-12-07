@@ -395,17 +395,24 @@ def state_structurize(state, context_label_dict, slot_value_index_dict):
         # initialize
         # 注意，初始化策略不太一样，mentioned是默认赋none为0，classify默认赋为slot value index的长度
         if no_value_assign_strategy == 'miss':
-            mentioned_idx = -1
-            if domain_slot_type_map[domain_slot] == 'classify':
-                hit_value = -1
-            else:
-                hit_value = -1, -1
+            raise ValueError('')
         elif no_value_assign_strategy == 'value':
             if domain_slot_type_map[domain_slot] == 'classify':
-                hit_value = len(slot_value_index_dict[domain_slot])
+                hit_value = value_index
+                assert hit_value < len(slot_value_index_dict[domain_slot])
+                if value_index == -1:
+                    hit_value = len(slot_value_index_dict[domain_slot])
             else:
-                hit_value = 0, 0
+                hit_value = span_idx_extract(context_label_dict, domain_slot, no_value_assign_strategy)
+            mentioned_slot = state[domain_slot]['mentioned_slot']
+            # 默认情况下预测为0的slot给None，也就是没有提到。因此这里的所有idx都往后排1
+            # 其实这里有点小问题，就是如果mentioned slot是valid mentioned slot list中极为靠前的一个turn, 然后这个turn
+            # 因为太远了又在本函数中被删除了，则可能出现mentioned但是又找不到idx的情况。这样会导致极少部分情况label标错
+            # 此处我们忽略这一问题
             mentioned_idx = 0
+            for idx in range(len(mentioned_slot_list)):
+                if mentioned_slot_list[idx][10] == mentioned_slot:
+                    mentioned_idx = idx + 1
         else:
             raise ValueError('')
 
@@ -416,23 +423,9 @@ def state_structurize(state, context_label_dict, slot_value_index_dict):
             hit_type = 1
         elif class_type == 'mentioned':
             hit_type = 2
-            mentioned_slot = state[domain_slot]['mentioned_slot']
-            # 默认情况下预测为0的slot给None，也就是没有提到。因此这里的所有idx都往后排1
-            # 其实这里有点小问题，就是如果mentioned slot是valid mentioned slot list中极为靠前的一个turn, 然后这个turn
-            # 因为太远了又在本函数中被删除了，则可能出现mentioned但是又找不到idx的情况。
-            mentioned_idx = -1
-            for idx in range(len(mentioned_slot_list)):
-                if mentioned_slot_list[idx][10] == mentioned_slot:
-                    mentioned_idx = idx + 1
-            assert mentioned_idx != -1
         else:
             assert class_type == 'hit'
             hit_type = 3
-            if domain_slot_type_map[domain_slot] == 'classify':
-                hit_value = value_index
-                assert hit_value < len(slot_value_index_dict[domain_slot])
-            else:
-                hit_value = span_idx_extract(context_label_dict, domain_slot, no_value_assign_strategy)
 
         reorganized_state[domain_slot]['hit_value'] = hit_value
         reorganized_state[domain_slot]['hit_type'] = hit_type
@@ -514,8 +507,9 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
         system_utterance_token, user_utterance_token = tokenize(system_utterance), tokenize(user_utterance)
         current_turn_utterance = user_utterance + ' ' + SEP_token + ' ' + system_utterance
         current_turn_utterance_token = user_utterance_token + [SEP_token] + system_utterance_token
-        context_utterance = current_turn_utterance + ' ' + SEP_token + ' ' + history
-        context_utterance_token = current_turn_utterance_token + [SEP_token] + history_token
+        # 此处，我们希望有一个token完成current turn和history的区分
+        context_utterance = current_turn_utterance + ' ' + UNK_token + ' ' + history
+        context_utterance_token = current_turn_utterance_token + [UNK_token] + history_token
         reorganize_data[idx]['context_utterance'] = CLS_token + ' ' + context_utterance
         reorganize_data[idx]['context_utterance_token'] = [CLS_token] + context_utterance_token
 
@@ -535,6 +529,8 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
             reorganize_data[idx]['state'][domain_slot] = {}
             value_label = labels[domain_slot]
             domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+            if value_label != 'none' and value_label != 'dontcare':
+                turn_mentioned_slot_set.add(str(idx) + '$label$' + domain + '$' + slot + '$' + value_label)
 
             class_type, mentioned_slot, possible_mentioned_slot_list, utterance_token_label, value_index = \
                 get_turn_label(value_label, context_utterance_token, domain_slot, mentioned_slot_set,
@@ -544,8 +540,6 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
                 class_type = 'none'
 
             # 把所有本轮的label全部置入mentioned slot set
-            if value_label != 'none' and value_label != 'dontcare':
-                turn_mentioned_slot_set.add(str(idx) + '$label$' + domain + '$' + slot + '$' + value_label)
             reorganize_data[idx]['state'][domain_slot]['class_type'] = class_type
             reorganize_data[idx]['state'][domain_slot]['classify_value'] = value_index
             reorganize_data[idx]['state'][domain_slot]['mentioned_slot'] = mentioned_slot
@@ -553,9 +547,10 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
             reorganize_data[idx]['state'][domain_slot]['possible_mentioned_slot_list'] = possible_mentioned_slot_list
 
         # 去重
-        mentioned_slot_set = eliminate_replicate_mentioned_slot(mentioned_slot_set.union(turn_mentioned_slot_set))
-        history = context_utterance
-        history_token = context_utterance_token
+        union_set = mentioned_slot_set.union(turn_mentioned_slot_set)
+        mentioned_slot_set = eliminate_replicate_mentioned_slot(union_set)
+        history = current_turn_utterance + ' ' + SEP_token + ' ' + history
+        history_token = current_turn_utterance_token + [SEP_token] + history_token
     return reorganize_data
 
 
@@ -566,7 +561,7 @@ def get_turn_label(value_label, context_utterance_token, domain_slot, mentioned_
     utterance_token_label = [0 for _ in context_utterance_token]
 
     value_index = -1
-    # 由于mentioned slot list总是存在的，和value label取值无关，因此要放在外面
+    # 由于mentioned slot list总是存在的，和value label取值无关，因此要放在外面，这样也可以提供mentioned的补充label
     is_mentioned, mentioned_slot, possible_mentioned_slot_list = \
         check_mentioned_slot(value_label, mentioned_slots, domain_slot)
     if value_label == 'none' or value_label == 'dontcare':

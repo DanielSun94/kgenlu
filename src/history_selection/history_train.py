@@ -3,8 +3,7 @@ from torch import BoolTensor, LongTensor
 import os
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from hisory_model import HistorySelectionModel
-from history_config import args, DEVICE, medium_result_template, evaluation_folder, ckpt_template, logger, \
-    MENTIONED_MAP_LIST
+from history_config import args, DEVICE, medium_result_template, evaluation_folder, ckpt_template, logger
 import pickle
 import torch.multiprocessing as mp
 from torch import nn
@@ -145,7 +144,6 @@ def save_model(multi_gpu, model, ckpt_path, local_rank=None):
     if multi_gpu:
         if local_rank == 0:
             torch.save(model.state_dict(), ckpt_path)
-        torch.distributed.barrier()
     else:
         torch.save(model.state_dict(), ckpt_path)
     logger.info('save model success')
@@ -216,7 +214,8 @@ def train_compute_loss_and_batch_eval(predict_gate_dict, predict_value_dict, pre
         label_mentioned_slot = train_batch[7][domain_slot].to(target_device)
 
         predict_dict[domain_slot] = reconstruct_prediction_train(domain_slot, predict_hit_type, predict_value,
-            predict_mentioned_slot, train_batch, slot_index_value_dict)
+                                                                 predict_mentioned_slot, train_batch,
+                                                                 slot_index_value_dict)
 
         gate_loss += cross_entropy(predict_hit_type, label_hit_type)
         mentioned_loss += cross_entropy(predict_mentioned_slot, label_mentioned_slot)

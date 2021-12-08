@@ -9,31 +9,31 @@ if config_name == 'roberta':
     config = {
         'load_ckpt_path': '',  # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1_9.ckpt'),  #  ''
         'start_epoch': 0,  # = 0
-        'process_name': 'no1-history-selection',
+        'process_name': 'no1-history-pure-encoder-test',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta-base',
         'max_length': 512,
-        'batch_size': 32,
-        'epoch': 60,
+        'batch_size': 4,
+        'epoch': 30,
         'data_fraction': 0.01,
         'encoder_d_model': 768,
-        'learning_rate': 0.000005,
-        'device': 'cuda:0',
+        'learning_rate': 0.00001,
+        'device': 'cuda:1',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
-        'use_multi_gpu': False,
+        'use_multi_gpu': True,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
-        'gate_weight': 0.2,
-        'mentioned_weight': 0.2,
-        'span_weight': 0.4,
-        'classify_weight': 0.2,
+        'gate_weight': 0.5,
+        'mentioned_weight': 0.5,
+        'span_weight': 0.5,
+        'classify_weight': 0.5,
         'overwrite_cache': False,
         'use_label_variant': True,
         'mode': 'train',  # train, eval
         'lock_embedding_parameter': True,
-        'mentioned_slot_pool_size': 12
+        'mentioned_slot_pool_size': 8
     }
 else:
     raise ValueError('Invalid Config Name')
@@ -99,40 +99,68 @@ result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}
 
 
 # logger
-log_file_name = os.path.abspath('../../resource/log_history_selection.txt')
+log_file_name = os.path.abspath('../../resource/log_{}.txt'.format(config['process_name']))
 FORMAT = "%(asctime)s %(message)s"
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 logging.basicConfig(level=logging.INFO, format=FORMAT, filename=log_file_name)
 console_logger = logging.StreamHandler()
-file_logger = logging.FileHandler(log_file_name, mode='a', encoding='UTF-8')
-file_logger.setLevel(logging.INFO)
 # console output format
 stream_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(lineno)d %(message)s")
 # file output format
-logging_format = logging.Formatter("%(asctime)s %(process)d %(module)s %(lineno)d %(message)s")
-file_logger.setFormatter(logging_format)
 console_logger.setFormatter(stream_format)
-logger.addHandler(file_logger)
 logger.addHandler(console_logger)
 logger.info("|------logger.info-----")
 
-
-MENTIONED_MAP_LIST = [
-    {'leaveat', 'arriveby', 'time'},
-    {'destination', 'departure', 'name'},
-    {'people'},
-    {'stay'},  # 指的是呆的时间
-    {'day'},  # 指具体星期几
-    {'food'},
-    {'pricerange'},
-    {'area'},
-    {'parking'},
-    {'stars'},
-    {'internet'},
-    {'type'}
-]
-
+#
+# MENTIONED_MAP_LIST = [
+#     {'leaveat', 'arriveby', 'time'},
+#     {'destination', 'departure', 'name'},
+#     {'people'},
+#     {'stay'},  # 指的是呆的时间
+#     {'day'},  # 指具体星期几
+#     {'food'},
+#     {'pricerange'},
+#     {'area'},
+#     {'parking'},
+#     {'stars'},
+#     {'internet'},
+#     {'type'}
+# ]
+# mentioned只涉及span，其实classify的准确度可以拉满，没有特别大的必要参考别的
+MENTIONED_MAP_LIST_DICT = {
+    # source->target
+    'taxi-leaveat': {"taxi-leaveat", 'train-arriveby'},
+    'taxi-destination': {'taxi-destination', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-departure'},
+    'taxi-departure': {'taxi-departure', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-destination'},
+    'taxi-arriveby': {'taxi-arriveby', 'train-leaveat'},
+    'restaurant-book-people': {'restaurant-book-people'},
+    'restaurant-book-day': {'restaurant-book-day'},
+    'restaurant-book-time': {'restaurant-book-time', 'taxi-arriveby'},
+    'restaurant-food': {'restaurant-food'},
+    'restaurant-pricerange': {'restaurant-pricerange'},
+    'restaurant-name': {'restaurant-name', 'taxi-destination', 'taxi-departure'},
+    'restaurant-area': {'attraction-area'},
+    'hotel-book-people': {'hotel-book-people'},
+    'hotel-book-day': {'hotel-book-day'},
+    'hotel-book-stay': {'hotel-book-stay'},
+    'hotel-name': {'hotel-name', 'taxi-destination', 'taxi-departure'},
+    'hotel-area': {'hotel-area'},
+    'hotel-stars': {'hotel-stars'},
+    'hotel-parking': {'hotel-parking'},
+    'hotel-pricerange': {'hotel-pricerange'},
+    'hotel-type': {'hotel-type'},
+    'hotel-internet': {'hotel-internet'},
+    'attraction-type': {'attraction-type'},
+    'attraction-name': {'attraction-name', 'taxi-destination', 'taxi-departure'},
+    'attraction-area': {'attraction-area'},
+    'train-book-people': {'train-book-people'},
+    'train-arriveby': {'train-arriveby', 'taxi-leaveat'},
+    'train-destination': {'train-destination', 'taxi-departure'},
+    'train-departure': {'train-departure', 'taxi-destination'},
+    'train-leaveat': {'train-leaveat', 'taxi-arriveby'},
+    'train-day': {'train-day'}
+}
 
 # 以下内容均为直接复制
 act_type = {

@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import csv
-from history_config import args, result_template, MENTIONED_MAP_LIST
+from history_config import args, result_template, MENTIONED_MAP_LIST_DICT
 from history_read_data import domain_slot_type_map, tokenizer, domain_slot_list, approximate_equal_test, \
     eliminate_replicate_mentioned_slot, get_str_id
 
@@ -176,26 +176,25 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
     candidate_mentioned_slot_list_dict = {domain_slot: set() for domain_slot in domain_slot_list}
 
     # 根据Update值设定candidate
-    for domain_slot in domain_slot_list:
-        value = update_label_dict[domain_slot][0]
-        source_domain, source_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+    for source_domain_slot in domain_slot_list:
+        value = update_label_dict[source_domain_slot][0]
         if value not in skip_value:
-            for domain_slot_target in domain_slot_list:
-                target_domain, target_slot = domain_slot_target.split('-')[0], domain_slot_target.split('-')[-1]
+            for target_domain_slot in domain_slot_list:
                 add_flag = False
                 if mentioned_type == 'label':
-                    for item in MENTIONED_MAP_LIST:
-                        if target_slot in item and source_slot in item:
+                    for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
+                        if item == target_domain_slot:
                             add_flag = True
                 elif mentioned_type == 'inform':
-                    if target_slot == source_slot and target_domain == target_domain:
+                    if source_domain_slot == target_domain_slot:
                         add_flag = True
                 else:
                     raise ValueError('')
                 if add_flag:
+                    source_domain, source_slot = source_domain_slot.split('-')[0], source_domain_slot.split('-')[-1]
                     candidate_str = str(current_turn_index)+'$'+mentioned_type+'$'+source_domain+'$'+source_slot+'$' + \
-                                    value
-                    candidate_mentioned_slot_list_dict[domain_slot_target].add(candidate_str)
+                        value
+                    candidate_mentioned_slot_list_dict[target_domain_slot].add(candidate_str)
     # 然后按照降序填入最新的previous mentioned value
     for domain_slot in domain_slot_list:
         last_str_mentioned_slot = last_str_mentioned_slot_dict[domain_slot]

@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader, RandomSampler, SequentialSampler, Datas
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from history_config import args, dev_idx_path, test_idx_path, act_data_path, label_normalize_path, dialogue_data_path, \
-    SEP_token, CLS_token, cache_path, logger, MENTIONED_MAP_LIST, DOMAIN_IDX_DICT, UNNORMALIZED_ACTION_SLOT, \
+    SEP_token, CLS_token, cache_path, logger, MENTIONED_MAP_LIST_DICT, DOMAIN_IDX_DICT, UNNORMALIZED_ACTION_SLOT, \
     ACT_SLOT_NAME_MAP_DICT, SLOT_IDX_DICT, ACT_MAP_DICT, PAD_token, UNK_token
 import random
 import re
@@ -615,7 +615,7 @@ def eliminate_replicate_mentioned_slot(mentioned_slot_set):
     return new_mention_slot_set
 
 
-def check_mentioned_slot(value_label, mentioned_slot_set, domain_slot):
+def check_mentioned_slot(value_label, mentioned_slot_set, target_domain_slot):
     # checked 211205
     # 我们规定了mentioned slot的参考范围。比如departure不能参考到时间，因此，mentioned_list并不是一个通用序列，而是slot specific的
     # 这样一方面看上去更为合理，另一方面也降低了计算负担
@@ -625,20 +625,20 @@ def check_mentioned_slot(value_label, mentioned_slot_set, domain_slot):
     # 如果是inform，要保证参考domain slot完全一致，如果是label，只需近似许可（我们假设不会出现用户答非所问的情况）
     possible_slot_list, valid_list = [], []
     for mentioned_slot in mentioned_slot_set:
-        turn_idx, mentioned_type, domain, source_slot, value = mentioned_slot.strip().split('$')
-        target_domain, target_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+        turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')
+        source_domain_slot = domain+'-'+slot if domain+'-'+slot in domain_slot_type_map else domain+'-book-'+slot
         if mentioned_type == 'label':
-            for item_set in MENTIONED_MAP_LIST:
-                if target_slot in item_set and source_slot in item_set:
+            for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
+                if item == target_domain_slot:
                     possible_slot_list.append(mentioned_slot)
                     if approximate_equal_test(value_label, value, use_variant=variant_flag):
-                        valid_list.append([turn_idx, mentioned_type, domain, source_slot, value, mentioned_slot])
+                        valid_list.append([turn_idx, mentioned_type, domain, slot, value, mentioned_slot])
         else:
             assert mentioned_type == 'inform'
-            if target_slot == source_slot and target_domain == domain:
+            if source_domain_slot == target_domain_slot:
                 possible_slot_list.append(mentioned_slot)
                 if approximate_equal_test(value_label, value, use_variant=variant_flag):
-                    valid_list.append([turn_idx, mentioned_type, domain, source_slot, value, mentioned_slot])
+                    valid_list.append([turn_idx, mentioned_type, domain, slot, value, mentioned_slot])
 
     if value_label == 'none' or value_label == 'dontcare':
         return False, 'none', possible_slot_list
@@ -651,7 +651,7 @@ def check_mentioned_slot(value_label, mentioned_slot_set, domain_slot):
         valid_list = sorted(valid_list, key=lambda x: int(x[0]))
         for index in range(len(valid_list)):
             turn_idx, mentioned_type, domain, slot, value, mentioned_slot = valid_list[len(valid_list)-1-index]
-            if domain_slot == domain+'-'+slot or domain_slot == domain+'-book-'+slot:
+            if target_domain_slot == domain+'-'+slot or target_domain_slot == domain+'-book-'+slot:
                 return True, mentioned_slot, possible_slot_list
         return True, valid_list[-1][5], possible_slot_list
 

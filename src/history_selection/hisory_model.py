@@ -152,17 +152,18 @@ class HistorySelectionModel(Module):
         # 预测Gate值
         gate_predict_dict = {}
         for domain_slot in domain_slot_list:
-            domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
-            query = (self.common_token_embedding_dict[domain]+self.common_token_embedding_dict[slot])/2+context/2
-            mentioned_slots_embedding = mentioned_slots_embedding_dict[domain_slot]
-            query_weight = self.gate_attention_query[domain_slot](query).unsqueeze(dim=2)
-            key_weight = self.gate_attention_key[domain_slot](mentioned_slots_embedding)
-            key_weight = self.gate_combine[domain_slot](key_weight)
-            score = torch.bmm(key_weight, query_weight).squeeze()
-            score = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + score
-            weight = torch.softmax(score, dim=1).unsqueeze(dim=2)
-            mentioned_slots_embedding = torch.sum(mentioned_slots_embedding * weight, dim=1, keepdim=True).squeeze()
-            embedding = mentioned_slots_embedding + context
+            # domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+            # query = (self.common_token_embedding_dict[domain]+self.common_token_embedding_dict[slot])/2+context/2
+            # mentioned_slots_embedding = mentioned_slots_embedding_dict[domain_slot]
+            # query_weight = self.gate_attention_query[domain_slot](query).unsqueeze(dim=2)
+            # key_weight = self.gate_attention_key[domain_slot](mentioned_slots_embedding)
+            # key_weight = self.gate_combine[domain_slot](key_weight)
+            # score = torch.bmm(key_weight, query_weight).squeeze()
+            # score = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + score
+            # weight = torch.softmax(score, dim=1).unsqueeze(dim=2)
+            # mentioned_slots_embedding = torch.sum(mentioned_slots_embedding * weight, dim=1, keepdim=True).squeeze()
+            # embedding = mentioned_slots_embedding + context
+            embedding = context
             gate_predict_dict[domain_slot] = self.gate_predict[domain_slot](embedding)
         return gate_predict_dict
 
@@ -178,10 +179,10 @@ class HistorySelectionModel(Module):
                 mentioned_slot_list = mentioned_slot_list_dict[domain_slot][sample_idx]
                 for mentioned_slot, str_mentioned_slot in zip(mentioned_slot_list, str_mentioned_slot_list):
                     # 按照正常情况，这些token一定能找到命中的值
-                    turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
-                    mentioned_type = self.common_token_embedding_dict[str_mentioned_slot[1]]
-                    domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
-                    slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    # turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
+                    # mentioned_type = self.common_token_embedding_dict[str_mentioned_slot[1]]
+                    # domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
+                    # slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
                     if str_mentioned_slot[4] in self.common_token_embedding_dict:
                         value = self.common_token_embedding_dict[str_mentioned_slot[4]]
                     else:
@@ -209,8 +210,7 @@ class HistorySelectionModel(Module):
                     # sample_list.append(mean(cat((value, mean(cat((turn, mentioned_type, domain, slot), dim=0), dim=0,
                     #                                          keepdim=True)), dim=0), dim=0, keepdim=True))
                     # 决定不用turn idx
-                    sample_list.append(mean(cat((value, mean(cat((mentioned_type, domain, slot), dim=0), dim=0,
-                                                             keepdim=True)), dim=0), dim=0, keepdim=True))
+                    sample_list.append(mean(value, dim=0, keepdim=True))
                 assert len(sample_list) == mentioned_slot_pool_size
                 mentioned_slots_embedding_dict[domain_slot].append(stack(sample_list))
             mentioned_slots_embedding_dict[domain_slot] = stack(mentioned_slots_embedding_dict[domain_slot]).squeeze(2)

@@ -259,9 +259,12 @@ def predict_label_reconstruct(utterance, mentioned_slots, predict_hit_type, pred
     elif predict_hit_type == 1:
         reconstructed_label = 'dontcare'
     elif predict_hit_type == 2:
-        slot_value = mentioned_slots[predict_mentioned_slot][4]
-        mentioned_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(slot_value)).strip()
-        reconstructed_label = mentioned_value
+        if predict_mentioned_slot == 0:
+            reconstructed_label = 'none'
+        else:
+            slot_value = mentioned_slots[predict_mentioned_slot][4]
+            mentioned_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(slot_value)).strip()
+            reconstructed_label = mentioned_value
     elif predict_hit_type == 3:
         if domain_slot_type_map[domain_slot] == 'classify':
             if hit_value_predict == len(slot_index_value_dict[domain_slot]):

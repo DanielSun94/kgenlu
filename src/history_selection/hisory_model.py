@@ -1,6 +1,5 @@
 import torch
-from torch import mean, cat, stack, LongTensor
-from tqdm import tqdm
+from torch import mean, stack, LongTensor
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from history_config import args, logger, DEVICE
 from torch.nn import ReLU, Linear, Sequential, Module, ModuleDict
@@ -53,7 +52,6 @@ class HistorySelectionModel(Module):
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
             self.gate_attention_key[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
-            self.gate_combine[domain_slot] = Linear(16, 16)
             if domain_slot_type_map[domain_slot] == 'classify':
                 if no_value_assign_strategy == 'miss':
                     num_value = len(self.slot_value_index_dict[domain_slot])
@@ -67,13 +65,11 @@ class HistorySelectionModel(Module):
         # m for mentioned slot
         self.m_query_para_dict = ModuleDict()
         self.m_slot_para_dict = ModuleDict()
-        self.m_combine_dict = ModuleDict()
         for domain_slot in domain_slot_list:
             self.m_query_para_dict[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
             self.m_slot_para_dict[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
-            self.m_combine_dict[domain_slot] = Linear(16, 16)
 
         # 是否锁定embedding的值
         self.token_embedding = self.encoder.model.embeddings.word_embeddings
@@ -124,12 +120,12 @@ class HistorySelectionModel(Module):
         for domain_slot in domain_slot_list:
             slot_type, weight = domain_slot_type_map[domain_slot], self.hit_parameter[domain_slot]
             if slot_type == 'classify':
-                predict_value_dict[domain_slot] = weight(encode[:, 0, :])
+                predict_value_dict[domain_slot] = weight(encode[:, 1, :])
             else:
                 predict_value_dict[domain_slot] = weight(encode)
 
         predict_mentioned_slot_dict = self.predict_mentioned_slot_value(
-            encode[:, 0, :], mentioned_slot_embedding_list_dict, mentioned_slot_list_mask_dict)
+            encode[:, 2, :], mentioned_slot_embedding_list_dict, mentioned_slot_list_mask_dict)
         predict_gate_dict = self.predict_gate_value(encode[:, 0, :], mentioned_slot_embedding_list_dict,
                                                     mentioned_slot_list_mask_dict)
 
@@ -142,7 +138,6 @@ class HistorySelectionModel(Module):
             query = (self.common_token_embedding_dict[domain] + self.common_token_embedding_dict[slot])/2 + context/2
             query_weight = self.m_query_para_dict[domain_slot](query).unsqueeze(dim=2)
             key_weight = self.m_slot_para_dict[domain_slot](mentioned_slots_embedding_dict[domain_slot])
-            key_weight = self.m_combine_dict[domain_slot](key_weight)
             predicted_value = torch.bmm(key_weight, query_weight).squeeze()
             predicted_value = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + predicted_value
             predict_mentioned_slot_dict[domain_slot] = predicted_value
@@ -157,7 +152,6 @@ class HistorySelectionModel(Module):
             # mentioned_slots_embedding = mentioned_slots_embedding_dict[domain_slot]
             # query_weight = self.gate_attention_query[domain_slot](query).unsqueeze(dim=2)
             # key_weight = self.gate_attention_key[domain_slot](mentioned_slots_embedding)
-            # key_weight = self.gate_combine[domain_slot](key_weight)
             # score = torch.bmm(key_weight, query_weight).squeeze()
             # score = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + score
             # weight = torch.softmax(score, dim=1).unsqueeze(dim=2)

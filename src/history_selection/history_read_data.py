@@ -48,7 +48,7 @@ unpointable_slot_value_list = []
 
 def main():
     logger.info('label_map load success')
-    _, __, train_loader, dev_loader, test_loader = prepare_data(True)
+    _, __, train_loader, dev_loader, test_loader, train_loader_1 = prepare_data(True)
     print(len(train_loader))
     batch_count = 0
     for _ in tqdm(train_loader):
@@ -90,13 +90,16 @@ def prepare_data(overwrite):
     train_data = SampleDataset(*train_data.get_fraction_data(float(data_fraction)))
     dev_data = SampleDataset(*dev_data.get_fraction_data(float(data_fraction)))
     test_data = SampleDataset(*test_data.get_fraction_data(float(data_fraction)))
-    dev_sampler, test_sampler = SequentialSampler(dev_data), SequentialSampler(test_data)
+    dev_sampler, test_sampler, train_1_sampler = SequentialSampler(dev_data), SequentialSampler(test_data), \
+        SequentialSampler(train_data)
     train_sampler = DistributedSampler(train_data) if use_multiple_gpu else RandomSampler(train_data)
+
     train_loader = DataLoader(train_data, sampler=train_sampler, batch_size=batch_size,
                               collate_fn=collate_fn)
     dev_loader = DataLoader(dev_data, sampler=dev_sampler, batch_size=1, collate_fn=collate_fn)
     test_loader = DataLoader(test_data, sampler=test_sampler, batch_size=1, collate_fn=collate_fn)
-    return slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader
+    train_loader_1 = DataLoader(train_data, sampler=train_1_sampler, batch_size=1, collate_fn=collate_fn)
+    return slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader, train_loader_1
 
 
 def construct_dataloader(processed_data, data_type):
@@ -510,8 +513,8 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
         # 此处，我们希望有一个token完成current turn和history的区分
         context_utterance = current_turn_utterance + ' ' + UNK_token + ' ' + history
         context_utterance_token = current_turn_utterance_token + [UNK_token] + history_token
-        reorganize_data[idx]['context_utterance'] = CLS_token + ' ' + context_utterance
-        reorganize_data[idx]['context_utterance_token'] = [CLS_token] + context_utterance_token
+        reorganize_data[idx]['context_utterance'] = (CLS_token + ' ')*3 + context_utterance
+        reorganize_data[idx]['context_utterance_token'] = [CLS_token]*3 + context_utterance_token
 
         # mention slot set包含上一轮的mentioned slot set与本轮system提到的slots
         # 注意，尽管Possible_mentioned_slot_list 和domain_slot相关，但是此处的mentioned_slot_set是所有mentioned过的总值
@@ -543,7 +546,7 @@ def dialogue_reorganize(dialogue_idx, utterance_list, state_dict, act_dict, slot
             reorganize_data[idx]['state'][domain_slot]['class_type'] = class_type
             reorganize_data[idx]['state'][domain_slot]['classify_value'] = value_index
             reorganize_data[idx]['state'][domain_slot]['mentioned_slot'] = mentioned_slot
-            reorganize_data[idx]['state'][domain_slot]['context_token_label'] = [0] + utterance_token_label
+            reorganize_data[idx]['state'][domain_slot]['context_token_label'] = [0]*3 + utterance_token_label
             reorganize_data[idx]['state'][domain_slot]['possible_mentioned_slot_list'] = possible_mentioned_slot_list
 
         # 去重
@@ -626,7 +629,10 @@ def check_mentioned_slot(value_label, mentioned_slot_set, target_domain_slot):
     possible_slot_list, valid_list = [], []
     for mentioned_slot in mentioned_slot_set:
         turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')
+        if value == 'none' or value == 'dontcare':
+            continue
         source_domain_slot = domain+'-'+slot if domain+'-'+slot in domain_slot_type_map else domain+'-book-'+slot
+        assert source_domain_slot in domain_slot_type_map
         if mentioned_type == 'label':
             for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
                 if item == target_domain_slot:

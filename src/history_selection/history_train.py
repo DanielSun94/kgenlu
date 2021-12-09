@@ -34,8 +34,8 @@ mentioned_weight = float(args['mentioned_weight'])
 weight_decay = args['weight_decay']
 
 
-def train(model, name, train_loader, dev_loader, test_loader, slot_index_value_dict, slot_value_index_dict,
-          local_rank=None):
+def train(model, name, train_loader, dev_loader, test_loader, train_loader_1, slot_index_value_dict,
+          slot_value_index_dict, local_rank=None):
     max_step = len(train_loader) * train_epoch
     num_warmup_steps = int(len(train_loader) * train_epoch * warmup_proportion)
     no_decay = ['bias', 'LayerNorm.weight']
@@ -129,8 +129,11 @@ def train(model, name, train_loader, dev_loader, test_loader, slot_index_value_d
                 eval_model.get_common_token_embedding(slot_value_index_dict)
                 load_model(multi_gpu=use_multi_gpu, model=eval_model, ckpt_path=current_process_ckpt_path,
                            local_rank=rank)
+
             logger.info('start evaluation in dev dataset, epoch: {}'.format(epoch))
             model_eval(eval_model, dev_loader, 'dev', epoch, slot_index_value_dict, target_device)
+            # logger.info('start evaluation in train dataset, epoch: {}'.format(epoch))
+            # model_eval(eval_model, train_loader_1, 'train', epoch, slot_index_value_dict, target_device)
             logger.info('start evaluation in test dataset, epoch: {}'.format(epoch))
             model_eval(eval_model, test_loader, 'test', epoch, slot_index_value_dict, target_device)
 
@@ -270,6 +273,10 @@ def model_eval(model, data_loader, data_type, epoch, slot_index_value_dict, loca
                     batch[10][domain_slot] = BoolTensor([last_mentioned_mask_dict[domain_slot]]).to(local_rank)
                 batch[9][domain_slot] = [last_mentioned_slot_dict[domain_slot]]
                 batch[11][domain_slot] = [last_str_mentioned_slot_dict[domain_slot]]
+                # 使用真值进行判断
+                # last_str_mentioned_slot_dict[domain_slot] = batch[11][domain_slot][0]
+                # last_mentioned_slot_dict[domain_slot] = batch[9][domain_slot][0]
+                # last_mentioned_mask_dict[domain_slot] = batch[10][domain_slot][0].cpu().detach().numpy()
 
             predict_gate_dict, predict_value_dict, predict_mentioned_slot_dict = model(batch)
             batch_predict_label_dict, last_sample_id, last_mentioned_slot_dict, last_mentioned_mask_dict, \
@@ -294,6 +301,8 @@ def inform_mentioned_slot_update(mentioned_slot_dict, mentioned_mask_dict, str_m
     valid_idx_dict = {}
     for domain_slot in domain_slot_list:
         target_domain, target_slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
+        # 按照设定，inform mentioned必须保证domain slot完全一致，因此按照设计不会出现target domain slot和source domain slot不一样的
+        # 问题，因此此处只需要参考target domain slot即可
         mentioned_slot_list = batch[11][domain_slot][0]
         for index in range(len(mentioned_slot_list)):
             mentioned_slot = batch[11][domain_slot][0][index]
@@ -328,7 +337,7 @@ def load_result_multi_gpu(data_type, epoch):
 
 
 def single_gpu_main(pass_info):
-    slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader = \
+    slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader, train_loader_1 = \
         prepare_data(overwrite=overwrite)
     pretrained_model_, name = pass_info
     model = HistorySelectionModel(name, pretrained_model_, slot_value_index_dict)
@@ -337,7 +346,8 @@ def single_gpu_main(pass_info):
     model.get_common_token_embedding(slot_value_index_dict)
     if os.path.exists(predefined_ckpt_path):
         load_model(use_multi_gpu, model, predefined_ckpt_path)
-    train(model, name, train_loader, dev_loader, test_loader, slot_index_value_dict, slot_value_index_dict)
+    train(model, name, train_loader, dev_loader, test_loader, train_loader_1,
+          slot_index_value_dict, slot_value_index_dict)
 
 
 def multi_gpu_main(local_rank, _, pass_info):
@@ -346,7 +356,8 @@ def multi_gpu_main(local_rank, _, pass_info):
     logger.info('GPU count: {}'.format(num_gpu))
     torch.distributed.init_process_group(backend="nccl", init_method='tcp://127.0.0.1:23456', world_size=num_gpu,
                                          rank=local_rank)
-    slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader = prepare_data(overwrite)
+    slot_value_index_dict, slot_index_value_dict, train_loader, dev_loader, test_loader, train_loader_1 = \
+        prepare_data(overwrite)
     logger.info('world size: {}'.format(torch.distributed.get_world_size()))
     local_rank = torch.distributed.get_rank()
     logger.info('local rank: {}'.format(local_rank))
@@ -365,7 +376,8 @@ def multi_gpu_main(local_rank, _, pass_info):
     if os.path.exists(predefined_ckpt_path):
         load_model(use_multi_gpu, model, predefined_ckpt_path, local_rank)
 
-    train(model, name, train_loader, dev_loader, test_loader, slot_index_value_dict, slot_value_index_dict, local_rank)
+    train(model, name, train_loader, dev_loader, test_loader, train_loader_1,
+          slot_index_value_dict, slot_value_index_dict, local_rank)
 
 
 def main():

@@ -7,22 +7,22 @@ import logging
 config_name = 'roberta'
 if config_name == 'roberta':
     config = {
-        'load_ckpt_path': '',  # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1_9.ckpt'),  #  ''
+        'load_ckpt_path': '', #os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1-history-pure-encoder_20.ckpt'),  #  ''
         'start_epoch': 0,  # = 0
-        'process_name': 'no1-history-pure-encoder-test',
+        'process_name': 'no1-history-pure-encoder-cls-separate',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
         'pretrained_model': 'roberta-base',
         'max_length': 512,
-        'batch_size': 4,
-        'epoch': 30,
-        'data_fraction': 0.01,
+        'batch_size': 16,
+        'epoch': 20,
+        'data_fraction': 1,
         'encoder_d_model': 768,
         'learning_rate': 0.00001,
-        'device': 'cuda:1',
+        'device': 'cuda:0',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
-        'use_multi_gpu': True,
+        'use_multi_gpu': False,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
         'gate_weight': 0.5,
@@ -89,7 +89,7 @@ label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
 
 
-cache_path = os.path.abspath('../../resource/history_selection_cache/dialogue_data_cache.pkl')
+cache_path = os.path.abspath('../../resource/history_selection_cache/dialogue_data_cache_{}.pkl'.format(config['process_name']))
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
 evaluation_folder = os.path.abspath('../../resource/evaluation')
 # dataset, time, epoch, general acc
@@ -130,10 +130,10 @@ logger.info("|------logger.info-----")
 # mentioned只涉及span，其实classify的准确度可以拉满，没有特别大的必要参考别的
 MENTIONED_MAP_LIST_DICT = {
     # source->target
-    'taxi-leaveat': {"taxi-leaveat", 'train-arriveby'},
+    'taxi-leaveat': {"taxi-leaveat"},
     'taxi-destination': {'taxi-destination', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-departure'},
-    'taxi-departure': {'taxi-departure', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-destination'},
-    'taxi-arriveby': {'taxi-arriveby', 'train-leaveat'},
+    'taxi-departure': {'taxi-departure'},
+    'taxi-arriveby': {'taxi-arriveby'},
     'restaurant-book-people': {'restaurant-book-people'},
     'restaurant-book-day': {'restaurant-book-day'},
     'restaurant-book-time': {'restaurant-book-time', 'taxi-arriveby'},
@@ -161,6 +161,40 @@ MENTIONED_MAP_LIST_DICT = {
     'train-leaveat': {'train-leaveat', 'taxi-arriveby'},
     'train-day': {'train-day'}
 }
+
+# MENTIONED_MAP_LIST_DICT = {
+#     # source->target
+#     'taxi-leaveat': {},
+#     'taxi-destination': {},
+#     'taxi-departure': {},
+#     'taxi-arriveby': {},
+#     'restaurant-book-people': {},
+#     'restaurant-book-day': {},
+#     'restaurant-book-time': {},
+#     'restaurant-food': {},
+#     'restaurant-pricerange': {},
+#     'restaurant-name': {},
+#     'restaurant-area': {},
+#     'hotel-book-people': {},
+#     'hotel-book-day': {},
+#     'hotel-book-stay': {},
+#     'hotel-name': {},
+#     'hotel-area': {},
+#     'hotel-stars': {},
+#     'hotel-parking': {},
+#     'hotel-pricerange': {},
+#     'hotel-type': {},
+#     'hotel-internet': {},
+#     'attraction-type': {},
+#     'attraction-name': {},
+#     'attraction-area': {},
+#     'train-book-people': {},
+#     'train-arriveby': {},
+#     'train-destination': {},
+#     'train-departure': {},
+#     'train-leaveat': {},
+#     'train-day': {}
+# }
 
 # 以下内容均为直接复制
 act_type = {

@@ -1,5 +1,5 @@
 import torch
-from torch import mean, stack, LongTensor
+from torch import mean, stack, LongTensor, cat
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from history_config import args, logger, DEVICE
 from torch.nn import ReLU, Linear, Sequential, Module, ModuleDict
@@ -44,7 +44,7 @@ class HistorySelectionModel(Module):
         self.gate_predict = ModuleDict()
         self.gate_attention_query = ModuleDict()
         self.gate_attention_key = ModuleDict()
-        self.gate_combine = ModuleDict()
+        # self.gate_combine = ModuleDict()
         self.hit_parameter = ModuleDict()
         for domain_slot in domain_slot_type_map:
             self.gate_predict[domain_slot] = Linear(self.embedding_dim, 4)
@@ -52,6 +52,7 @@ class HistorySelectionModel(Module):
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
             self.gate_attention_key[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
+            # self.gate_combine[domain_slot] = Linear(16, 16)
             if domain_slot_type_map[domain_slot] == 'classify':
                 if no_value_assign_strategy == 'miss':
                     num_value = len(self.slot_value_index_dict[domain_slot])
@@ -65,11 +66,13 @@ class HistorySelectionModel(Module):
         # m for mentioned slot
         self.m_query_para_dict = ModuleDict()
         self.m_slot_para_dict = ModuleDict()
+        self.m_combine_dict = ModuleDict()
         for domain_slot in domain_slot_list:
             self.m_query_para_dict[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
             self.m_slot_para_dict[domain_slot] = \
                 Sequential(Linear(self.embedding_dim, 16), ReLU(), Linear(16, 16), ReLU())
+            self.m_combine_dict[domain_slot] = Linear(16, 16)
 
         # 是否锁定embedding的值
         self.token_embedding = self.encoder.model.embeddings.word_embeddings
@@ -138,6 +141,7 @@ class HistorySelectionModel(Module):
             query = (self.common_token_embedding_dict[domain] + self.common_token_embedding_dict[slot])/2 + context/2
             query_weight = self.m_query_para_dict[domain_slot](query).unsqueeze(dim=2)
             key_weight = self.m_slot_para_dict[domain_slot](mentioned_slots_embedding_dict[domain_slot])
+            key_weight = self.m_combine_dict[domain_slot](key_weight)
             predicted_value = torch.bmm(key_weight, query_weight).squeeze()
             predicted_value = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + predicted_value
             predict_mentioned_slot_dict[domain_slot] = predicted_value
@@ -175,8 +179,8 @@ class HistorySelectionModel(Module):
                     # 按照正常情况，这些token一定能找到命中的值
                     # turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
                     # mentioned_type = self.common_token_embedding_dict[str_mentioned_slot[1]]
-                    # domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
-                    # slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
+                    slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
                     if str_mentioned_slot[4] in self.common_token_embedding_dict:
                         value = self.common_token_embedding_dict[str_mentioned_slot[4]]
                     else:
@@ -204,7 +208,9 @@ class HistorySelectionModel(Module):
                     # sample_list.append(mean(cat((value, mean(cat((turn, mentioned_type, domain, slot), dim=0), dim=0,
                     #                                          keepdim=True)), dim=0), dim=0, keepdim=True))
                     # 决定不用turn idx
-                    sample_list.append(mean(value, dim=0, keepdim=True))
+                    # sample_list.append(mean(value, dim=0, keepdim=True))
+                    sample_list.append(mean(cat((value, mean(cat((domain, slot), dim=0), dim=0,
+                                                             keepdim=True)), dim=0), dim=0, keepdim=True))
                 assert len(sample_list) == mentioned_slot_pool_size
                 mentioned_slots_embedding_dict[domain_slot].append(stack(sample_list))
             mentioned_slots_embedding_dict[domain_slot] = stack(mentioned_slots_embedding_dict[domain_slot]).squeeze(2)

@@ -147,7 +147,9 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
         predict_mentioned_slot = predict_mentioned_slot_dict[domain_slot][0]
         hit_type_predict = int(np.argmax(predict_hit_type_one_slot))
         last_mentioned_slot = last_mentioned_slot_dict[domain_slot]
-        predicted_mentioned_slot_idx = int(np.argmax(predict_mentioned_slot))
+        # 此处，由于predict mentioned slot和predict value one slot的0和length index分别对应none，其实是无意义的一个占位符
+        # 真正预测none其实由gate predict完成，因此此处相关预测到none的会被放弃，只取有效值中概率最大的
+        predicted_mentioned_slot_idx = int(np.argmax(predict_mentioned_slot[1:])) + 1
 
         if domain_slot_type_map[domain_slot] == 'classify':
             hit_value_predict = int(np.argmax(predict_value_one_slot))
@@ -254,32 +256,40 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
 
 def predict_label_reconstruct(utterance, mentioned_slots, predict_hit_type, predict_mentioned_slot, hit_value_predict,
                               domain_slot, slot_index_value_dict):
+    slot_value = mentioned_slots[predict_mentioned_slot][4]
+    mentioned_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(slot_value)).strip()
+    reconstructed_label_mention_candidate = mentioned_value
+
+    if domain_slot_type_map[domain_slot] == 'classify':
+        if hit_value_predict == len(slot_index_value_dict[domain_slot]):
+            reconstructed_label_new_candidate = 'none'
+        else:
+            reconstructed_label_new_candidate = slot_index_value_dict[domain_slot][hit_value_predict]
+    else:
+        assert domain_slot_type_map[domain_slot] == 'span'
+        start_idx, end_idx = hit_value_predict
+        if start_idx <= end_idx:
+            target_utterance = utterance[start_idx: end_idx + 1]
+            target_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(target_utterance))
+            reconstructed_label_new_candidate = target_value
+        else:
+            reconstructed_label_new_candidate = 'none'
+
     if predict_hit_type == 0:  # for
         reconstructed_label = 'none'
     elif predict_hit_type == 1:
         reconstructed_label = 'dontcare'
     elif predict_hit_type == 2:
-        if predict_mentioned_slot == 0:
-            reconstructed_label = 'none'
+        if reconstructed_label_mention_candidate == '<pad>':
+            reconstructed_label = reconstructed_label_new_candidate
         else:
-            slot_value = mentioned_slots[predict_mentioned_slot][4]
-            mentioned_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(slot_value)).strip()
-            reconstructed_label = mentioned_value
+            reconstructed_label = reconstructed_label_mention_candidate
     elif predict_hit_type == 3:
-        if domain_slot_type_map[domain_slot] == 'classify':
-            if hit_value_predict == len(slot_index_value_dict[domain_slot]):
-                reconstructed_label = 'none'
-            else:
-                reconstructed_label = slot_index_value_dict[domain_slot][hit_value_predict]
-        else:
-            assert domain_slot_type_map[domain_slot] == 'span'
-            start_idx, end_idx = hit_value_predict
-            if start_idx <= end_idx:
-                target_utterance = utterance[start_idx: end_idx + 1]
-                target_value = tokenizer.convert_tokens_to_string(tokenizer.convert_ids_to_tokens(target_utterance))
-                reconstructed_label = target_value
-            else:
-                reconstructed_label = 'none'
+        reconstructed_label = reconstructed_label_new_candidate
+        # if reconstructed_label_new_candidate == 'none' and reconstructed_label_mention_candidate != '<pad>':
+        #     reconstructed_label = reconstructed_label_mention_candidate
+        # else:
+        #     reconstructed_label = reconstructed_label_new_candidate
     else:
         raise ValueError('invalid value')
     return reconstructed_label

@@ -7,28 +7,29 @@ import logging
 config_name = 'roberta'
 if config_name == 'roberta':
     config = {
-        'load_ckpt_path': '', #os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1-history-pure-encoder_20.ckpt'),  #  ''
+        'load_ckpt_path': '', # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1-history-pure-encoder-cls-separate_5.ckpt'),  #  ''
         'start_epoch': 0,  # = 0
-        'process_name': 'no1-history-pure-encoder-cls-separate',
+        'process_name': 'history-pure-encoder-cls-separate-large',
+        'process_no': 'no1',
         'train_domain': 'hotel$train$restaurant$attraction$taxi',
         'test_domain': 'hotel$train$restaurant$attraction$taxi',
-        'pretrained_model': 'roberta-base',
+        'pretrained_model': 'roberta-large',
         'max_length': 512,
-        'batch_size': 16,
-        'epoch': 20,
+        'batch_size': 8,
+        'epoch': 30,
         'data_fraction': 1,
-        'encoder_d_model': 768,
-        'learning_rate': 0.00001,
-        'device': 'cuda:0',
+        'encoder_d_model': 1024,
+        'learning_rate': 0.000005,
+        'device': 'cuda:1',
         'auxiliary_act_domain_assign': True,
         'delex_system_utterance': False,
         'use_multi_gpu': False,
         'no_value_assign_strategy': 'value',  # value
         'max_grad_norm': 1.0,
-        'gate_weight': 0.5,
-        'mentioned_weight': 0.5,
-        'span_weight': 0.5,
-        'classify_weight': 0.5,
+        'gate_weight': 0.2,
+        'mentioned_weight': 0.2,
+        'span_weight': 0.4,
+        'classify_weight': 0.2,
         'overwrite_cache': False,
         'use_label_variant': True,
         'mode': 'train',  # train, eval
@@ -93,13 +94,15 @@ cache_path = os.path.abspath('../../resource/history_selection_cache/dialogue_da
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
 evaluation_folder = os.path.abspath('../../resource/evaluation')
 # dataset, time, epoch, general acc
-medium_result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}_{}_{}_{}.pkl')
-ckpt_template = os.path.join(os.path.abspath('../../resource/model_checkpoint'), '{}_{}.ckpt')
-result_template = os.path.join(os.path.abspath('../../resource/evaluation'), '{}_{}_epoch_{}_{}.csv')
+medium_result_template = os.path.join(os.path.abspath('../../resource/evaluation'), config['process_no'] +
+                                      '{}_{}_{}_{}.pkl')
+ckpt_template = os.path.join(os.path.abspath('../../resource/model_checkpoint'), config['process_no']+'{}_{}.ckpt')
+result_template = os.path.join(os.path.abspath('../../resource/evaluation'), config['process_no'] +
+                               '{}_{}_epoch_{}_{}.csv')
 
 
 # logger
-log_file_name = os.path.abspath('../../resource/log_{}.txt'.format(config['process_name']))
+log_file_name = os.path.abspath('../../resource/log_{}_{}.txt'.format(config['process_no'], config['process_name']))
 FORMAT = "%(asctime)s %(message)s"
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

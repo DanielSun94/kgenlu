@@ -3,12 +3,14 @@ from torch import mean, stack, LongTensor, cat
 from history_read_data import prepare_data, domain_slot_list, domain_slot_type_map, SampleDataset
 from history_config import args, logger, DEVICE
 from torch.nn import ReLU, Linear, Sequential, Module, ModuleDict
-from transformers import RobertaModel
-from transformers import RobertaTokenizer
+from transformers import RobertaModel, BertModel
+from transformers import RobertaTokenizer, BertTokenizer
 
 
 if 'roberta' in args['pretrained_model']:
     tokenizer = RobertaTokenizer.from_pretrained(args['pretrained_model'])
+elif 'bert' in args['pretrained_model']:
+    tokenizer = BertTokenizer.from_pretrained(args['pretrained_model'])
 else:
     raise ValueError('')
 no_value_assign_strategy = args['no_value_assign_strategy']
@@ -137,8 +139,7 @@ class HistorySelectionModel(Module):
     def predict_mentioned_slot_value(self, context, mentioned_slots_embedding_dict, mentioned_slot_list_mask_dict):
         predict_mentioned_slot_dict = {}
         for domain_slot in domain_slot_list:
-            domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
-            query = (self.common_token_embedding_dict[domain] + self.common_token_embedding_dict[slot])/2 + context/2
+            query = context
             query_weight = self.m_query_para_dict[domain_slot](query).unsqueeze(dim=2)
             key_weight = self.m_slot_para_dict[domain_slot](mentioned_slots_embedding_dict[domain_slot])
             key_weight = self.m_combine_dict[domain_slot](key_weight)
@@ -151,17 +152,16 @@ class HistorySelectionModel(Module):
         # 预测Gate值
         gate_predict_dict = {}
         for domain_slot in domain_slot_list:
-            # domain, slot = domain_slot.split('-')[0], domain_slot.split('-')[-1]
-            # query = (self.common_token_embedding_dict[domain]+self.common_token_embedding_dict[slot])/2+context/2
-            # mentioned_slots_embedding = mentioned_slots_embedding_dict[domain_slot]
-            # query_weight = self.gate_attention_query[domain_slot](query).unsqueeze(dim=2)
-            # key_weight = self.gate_attention_key[domain_slot](mentioned_slots_embedding)
-            # score = torch.bmm(key_weight, query_weight).squeeze()
-            # score = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + score
-            # weight = torch.softmax(score, dim=1).unsqueeze(dim=2)
-            # mentioned_slots_embedding = torch.sum(mentioned_slots_embedding * weight, dim=1, keepdim=True).squeeze()
-            # embedding = mentioned_slots_embedding + context
-            embedding = context
+            query = context
+            mentioned_slots_embedding = mentioned_slots_embedding_dict[domain_slot]
+            query_weight = self.gate_attention_query[domain_slot](query).unsqueeze(dim=2)
+            key_weight = self.gate_attention_key[domain_slot](mentioned_slots_embedding)
+            score = torch.bmm(key_weight, query_weight).squeeze()
+            score = (~mentioned_slot_list_mask_dict[domain_slot]) * -1e6 + score
+            weight = torch.softmax(score, dim=1).unsqueeze(dim=2)
+            mentioned_slots_embedding = torch.sum(mentioned_slots_embedding * weight, dim=1, keepdim=True).squeeze()
+            embedding = mentioned_slots_embedding + context
+            # embedding = context
             gate_predict_dict[domain_slot] = self.gate_predict[domain_slot](embedding)
         return gate_predict_dict
 
@@ -180,7 +180,7 @@ class HistorySelectionModel(Module):
                     # turn = self.common_token_embedding_dict[str_mentioned_slot[0]]
                     # mentioned_type = self.common_token_embedding_dict[str_mentioned_slot[1]]
                     domain = self.common_token_embedding_dict[str_mentioned_slot[2]]
-                    slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
+                    # slot = self.common_token_embedding_dict[str_mentioned_slot[3]]
                     if str_mentioned_slot[4] in self.common_token_embedding_dict:
                         value = self.common_token_embedding_dict[str_mentioned_slot[4]]
                     else:
@@ -208,9 +208,9 @@ class HistorySelectionModel(Module):
                     # sample_list.append(mean(cat((value, mean(cat((turn, mentioned_type, domain, slot), dim=0), dim=0,
                     #                                          keepdim=True)), dim=0), dim=0, keepdim=True))
                     # 决定不用turn idx
-                    # sample_list.append(mean(value, dim=0, keepdim=True))
-                    sample_list.append(mean(cat((value, mean(cat((domain, slot), dim=0), dim=0,
-                                                             keepdim=True)), dim=0), dim=0, keepdim=True))
+                    sample_list.append(mean(value, dim=0, keepdim=True))
+                    # sample_list.append(mean(cat((value, mean(cat((domain, slot), dim=0), dim=0,
+                    #                                          keepdim=True)), dim=0), dim=0, keepdim=True))
                 assert len(sample_list) == mentioned_slot_pool_size
                 mentioned_slots_embedding_dict[domain_slot].append(stack(sample_list))
             mentioned_slots_embedding_dict[domain_slot] = stack(mentioned_slots_embedding_dict[domain_slot]).squeeze(2)
@@ -223,6 +223,8 @@ class PretrainedEncoder(Module):
         self._model_name = pretrained_model_name
         if 'roberta' in pretrained_model_name:
             self.model = RobertaModel.from_pretrained(pretrained_model_name)
+        elif 'bert' in pretrained_model_name:
+            self.model = BertModel.from_pretrained(pretrained_model_name)
         else:
             ValueError('Invalid Pretrained Model')
 
@@ -235,7 +237,7 @@ class PretrainedEncoder(Module):
         # required format: [batch_size, sequence_length]
         if 'roberta' in self._model_name:
             assert context.shape[1] <= 512
-        if 'roberta' in self._model_name:
+        if 'roberta' in self._model_name or 'bert' in self._model_name:
             output = self.model(context, attention_mask=padding_mask)['last_hidden_state']
             return output
         else:

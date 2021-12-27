@@ -5,39 +5,44 @@ import logging
 
 # task and model setting
 config_name = 'roberta'
-if config_name == 'roberta':
-    config = {
-        'load_ckpt_path': '', # os.path.join(os.path.abspath('../../resource/model_checkpoint'), 'no1-history-pure-encoder-cls-separate_5.ckpt'),  #  ''
-        'start_epoch': 0,  # = 0
-        'process_name': 'history-pure-encoder-cls-separate-large',
-        'process_no': 'no1',
-        'train_domain': 'hotel$train$restaurant$attraction$taxi',
-        'test_domain': 'hotel$train$restaurant$attraction$taxi',
-        'pretrained_model': 'roberta-large',
-        'max_length': 512,
-        'batch_size': 8,
-        'epoch': 30,
-        'data_fraction': 1,
-        'encoder_d_model': 1024,
-        'learning_rate': 0.000005,
-        'device': 'cuda:1',
-        'auxiliary_act_domain_assign': True,
-        'delex_system_utterance': False,
-        'use_multi_gpu': False,
-        'no_value_assign_strategy': 'value',  # value
-        'max_grad_norm': 1.0,
-        'gate_weight': 0.2,
-        'mentioned_weight': 0.2,
-        'span_weight': 0.4,
-        'classify_weight': 0.2,
-        'overwrite_cache': False,
-        'use_label_variant': True,
-        'mode': 'train',  # train, eval
-        'lock_embedding_parameter': True,
-        'mentioned_slot_pool_size': 8
-    }
-else:
-    raise ValueError('Invalid Config Name')
+model_type = 'base'
+dataset = 'multiwoz22'
+d_model = 768
+lr = 0.00001
+device = 'cuda:1'
+mentioned_type = 'no'
+config = {
+    'load_ckpt_path': '',
+    # os.path.join(os.path.abspath('../../resource/model_checkpoint'), '_history-mix-3-base-self-mention_12.ckpt'),  #  ''
+    'start_epoch': 0,  # = 0
+    'process_name': 'history-mix-'+dataset+'-'+config_name+'-'+model_type + '-' + mentioned_type + '-mention',
+    'process_no': '',
+    'train_domain': 'hotel$train$restaurant$attraction$taxi',
+    'test_domain': 'hotel$train$restaurant$attraction$taxi',
+    'pretrained_model': config_name + '-' + model_type,
+    'max_length': 512,
+    'dataset': dataset,
+    'batch_size': 8,
+    'epoch': 20,
+    'data_fraction': 1,
+    'encoder_d_model': d_model,
+    'learning_rate': lr,
+    'device': device,
+    'auxiliary_act_domain_assign': True,
+    'delex_system_utterance': False,
+    'use_multi_gpu': False,
+    'no_value_assign_strategy': 'value',  # value
+    'max_grad_norm': 1.0,
+    'gate_weight': 0.6,
+    'mentioned_weight': 0.2,
+    'span_weight': 0.2,
+    'classify_weight': 0.2,
+    'overwrite_cache': False,
+    'use_label_variant': True,
+    'mode': 'train',  # train, eval
+    'lock_embedding_parameter': True,
+    'mentioned_slot_pool_size': 3
+}
 
 
 DEVICE = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
@@ -45,7 +50,9 @@ DEVICE = torch.device(config['device'] if torch.cuda.is_available() else "cpu")
 parser = argparse.ArgumentParser(description='history_selection')
 parser.add_argument('--load_ckpt_path', help='', default=config['load_ckpt_path'])
 parser.add_argument('--use_label_variant', help='', default=config['use_label_variant'])
+parser.add_argument('--device', help='', default=config['device'])
 parser.add_argument('--mode', help='', default=config['mode'])
+parser.add_argument('--dataset', help='', default=config['dataset'])
 parser.add_argument('--lock_embedding_parameter', help='', default=config['lock_embedding_parameter'])
 parser.add_argument('--start_epoch', help='', default=config['start_epoch'])
 parser.add_argument('--process_name', help='', default=config['process_name'])
@@ -82,23 +89,25 @@ UNK_token, PAD_token, SEP_token, CLS_token = '<unk>', '<pad>', '</s>', '<s>'
 
 
 # resource path
-multiwoz_dataset_folder = os.path.abspath('../../resource/multiwoz')
+multiwoz_dataset_folder = os.path.abspath('../../resource/'+dataset)
 dialogue_data_path = os.path.join(multiwoz_dataset_folder, 'data.json')
 dev_idx_path = os.path.join(multiwoz_dataset_folder, 'valListFile.json')
 test_idx_path = os.path.join(multiwoz_dataset_folder, 'testListFile.json')
 label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
+approximate_equal_path = os.path.join(multiwoz_dataset_folder, 'approximate_test.json')
 
-
-cache_path = os.path.abspath('../../resource/history_selection_cache/dialogue_data_cache_{}.pkl'.format(config['process_name']))
+cache_path = os.path.abspath('../../resource/history_selection_cache/dialogue_data_cache_{}.pkl'
+                             .format(config['process_name']))
 model_checkpoint_folder = os.path.abspath('../../resource/model_check_point')
 evaluation_folder = os.path.abspath('../../resource/evaluation')
 # dataset, time, epoch, general acc
 medium_result_template = os.path.join(os.path.abspath('../../resource/evaluation'), config['process_no'] +
-                                      '{}_{}_{}_{}.pkl')
-ckpt_template = os.path.join(os.path.abspath('../../resource/model_checkpoint'), config['process_no']+'{}_{}.ckpt')
+                                      '_{}_{}_{}_{}.pkl')
+ckpt_template = os.path.join(os.path.abspath('../../resource/model_checkpoint'), config['process_no']+'_{}_{}.ckpt')
 result_template = os.path.join(os.path.abspath('../../resource/evaluation'), config['process_no'] +
-                               '{}_{}_epoch_{}_{}.csv')
+                               '_{}_{}_epoch_{}_{}.csv')
+
 
 
 # logger
@@ -130,74 +139,143 @@ logger.info("|------logger.info-----")
 #     {'internet'},
 #     {'type'}
 # ]
-# mentioned只涉及span，其实classify的准确度可以拉满，没有特别大的必要参考别的
-MENTIONED_MAP_LIST_DICT = {
-    # source->target
-    'taxi-leaveat': {"taxi-leaveat"},
-    'taxi-destination': {'taxi-destination', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-departure'},
-    'taxi-departure': {'taxi-departure'},
-    'taxi-arriveby': {'taxi-arriveby'},
-    'restaurant-book-people': {'restaurant-book-people'},
-    'restaurant-book-day': {'restaurant-book-day'},
-    'restaurant-book-time': {'restaurant-book-time', 'taxi-arriveby'},
-    'restaurant-food': {'restaurant-food'},
-    'restaurant-pricerange': {'restaurant-pricerange'},
-    'restaurant-name': {'restaurant-name', 'taxi-destination', 'taxi-departure'},
-    'restaurant-area': {'attraction-area'},
-    'hotel-book-people': {'hotel-book-people'},
-    'hotel-book-day': {'hotel-book-day'},
-    'hotel-book-stay': {'hotel-book-stay'},
-    'hotel-name': {'hotel-name', 'taxi-destination', 'taxi-departure'},
-    'hotel-area': {'hotel-area'},
-    'hotel-stars': {'hotel-stars'},
-    'hotel-parking': {'hotel-parking'},
-    'hotel-pricerange': {'hotel-pricerange'},
-    'hotel-type': {'hotel-type'},
-    'hotel-internet': {'hotel-internet'},
-    'attraction-type': {'attraction-type'},
-    'attraction-name': {'attraction-name', 'taxi-destination', 'taxi-departure'},
-    'attraction-area': {'attraction-area'},
-    'train-book-people': {'train-book-people'},
-    'train-arriveby': {'train-arriveby', 'taxi-leaveat'},
-    'train-destination': {'train-destination', 'taxi-departure'},
-    'train-departure': {'train-departure', 'taxi-destination'},
-    'train-leaveat': {'train-leaveat', 'taxi-arriveby'},
-    'train-day': {'train-day'}
+#
+POSSIBLE_MENTIONED_MAP_LIST_DICT = {
+    'custom': {
+        # source->target
+        'taxi-leaveat': {"taxi-leaveat"},
+        'taxi-destination': {'taxi-destination'},
+        'taxi-departure': {},
+        'taxi-arriveby': {'taxi-arriveby'},
+        'restaurant-book-people': {'restaurant-book-people'},
+        'restaurant-book-day': {'restaurant-book-day'},
+        'restaurant-book-time': {'restaurant-book-time'},
+        'restaurant-food': {},
+        'restaurant-pricerange': {'restaurant-pricerange'},
+        'restaurant-name': {},
+        'restaurant-area': {},
+        'hotel-book-people': {},
+        'hotel-book-day': {},
+        'hotel-book-stay': {},
+        'hotel-name': {},
+        'hotel-area': {},
+        'hotel-stars': {},
+        'hotel-parking': {},
+        'hotel-pricerange': {},
+        'hotel-type': {},
+        'hotel-internet': {},
+        'attraction-type': {},
+        'attraction-name': {'attraction-name'},
+        'attraction-area': {},
+        'train-book-people': {},
+        'train-arriveby': {},
+        'train-destination': {},
+        'train-departure': {},
+        'train-leaveat': {},
+        'train-day': {}
+    },
+    'self': {
+        'taxi-leaveat': {"taxi-leaveat"},
+        'taxi-destination': {'taxi-destination'},
+        'taxi-departure': {'taxi-departure'},
+        'taxi-arriveby': {'taxi-arriveby'},
+        'restaurant-book-people': {'restaurant-book-people'},
+        'restaurant-book-day': {'restaurant-book-day'},
+        'restaurant-book-time': {'restaurant-book-time'},
+        'restaurant-food': {'restaurant-food'},
+        'restaurant-pricerange': {'restaurant-pricerange'},
+        'restaurant-name': {'restaurant-name'},
+        'restaurant-area': {'restaurant-area'},
+        'hotel-book-people': {'hotel-book-people'},
+        'hotel-book-day': {'hotel-book-day'},
+        'hotel-book-stay': {'hotel-book-stay'},
+        'hotel-name': {'hotel-name'},
+        'hotel-area': {'hotel-area'},
+        'hotel-stars': {'hotel-stars'},
+        'hotel-parking': {'hotel-parking'},
+        'hotel-pricerange': {'hotel-pricerange'},
+        'hotel-type': {'hotel-type'},
+        'hotel-internet': {'hotel-internet'},
+        'attraction-type': {'attraction-type'},
+        'attraction-name': {'attraction-name'},
+        'attraction-area': {'attraction-area'},
+        'train-book-people': {'train-book-people'},
+        'train-arriveby': {'train-arriveby'},
+        'train-destination': {'train-destination'},
+        'train-departure': {'train-departure'},
+        'train-leaveat': {'train-leaveat'},
+        'train-day': {'train-day'}
+    },
+    'no': {
+        'taxi-leaveat': {},
+        'taxi-destination': {},
+        'taxi-departure': {},
+        'taxi-arriveby': {},
+        'restaurant-book-people': {},
+        'restaurant-book-day': {},
+        'restaurant-book-time': {},
+        'restaurant-food': {},
+        'restaurant-pricerange': {},
+        'restaurant-name': {},
+        'restaurant-area': {},
+        'hotel-book-people': {},
+        'hotel-book-day': {},
+        'hotel-book-stay': {},
+        'hotel-name': {},
+        'hotel-area': {},
+        'hotel-stars': {},
+        'hotel-parking': {},
+        'hotel-pricerange': {},
+        'hotel-type': {},
+        'hotel-internet': {},
+        'attraction-type': {},
+        'attraction-name': {},
+        'attraction-area': {},
+        'train-book-people': {},
+        'train-arriveby': {},
+        'train-destination': {},
+        'train-departure': {},
+        'train-leaveat': {},
+        'train-day': {}
+    },
+    'full': {
+        'taxi-leaveat': {"taxi-leaveat"},
+        'taxi-destination': {'taxi-destination', 'restaurant-name', 'attraction-name', 'hotel-name', 'train-departure'},
+        'taxi-departure': {'taxi-departure'},
+        'taxi-arriveby': {'taxi-arriveby'},
+        'restaurant-book-people': {'restaurant-book-people'},
+        'restaurant-book-day': {'restaurant-book-day'},
+        'restaurant-book-time': {'restaurant-book-time', 'taxi-arriveby'},
+        'restaurant-food': {'restaurant-food'},
+        'restaurant-pricerange': {'restaurant-pricerange'},
+        'restaurant-name': {'restaurant-name', 'taxi-destination', 'taxi-departure'},
+        'restaurant-area': {'restaurant-area'},
+        'hotel-book-people': {'hotel-book-people'},
+        'hotel-book-day': {'hotel-book-day'},
+        'hotel-book-stay': {'hotel-book-stay'},
+        'hotel-name': {'hotel-name', 'taxi-destination', 'taxi-departure'},
+        'hotel-area': {'hotel-area'},
+        'hotel-stars': {'hotel-stars'},
+        'hotel-parking': {'hotel-parking'},
+        'hotel-pricerange': {'hotel-pricerange'},
+        'hotel-type': {'hotel-type'},
+        'hotel-internet': {'hotel-internet'},
+        'attraction-type': {'attraction-type'},
+        'attraction-name': {'attraction-name', 'taxi-destination', 'taxi-departure'},
+        'attraction-area': {'attraction-area'},
+        'train-book-people': {'train-book-people'},
+        'train-arriveby': {'train-arriveby', 'taxi-leaveat'},
+        'train-destination': {'train-destination', 'taxi-departure'},
+        'train-departure': {'train-departure', 'taxi-destination'},
+        'train-leaveat': {'train-leaveat', 'taxi-arriveby'},
+        'train-day': {'train-day'}
+    }
 }
 
-# MENTIONED_MAP_LIST_DICT = {
-#     # source->target
-#     'taxi-leaveat': {},
-#     'taxi-destination': {},
-#     'taxi-departure': {},
-#     'taxi-arriveby': {},
-#     'restaurant-book-people': {},
-#     'restaurant-book-day': {},
-#     'restaurant-book-time': {},
-#     'restaurant-food': {},
-#     'restaurant-pricerange': {},
-#     'restaurant-name': {},
-#     'restaurant-area': {},
-#     'hotel-book-people': {},
-#     'hotel-book-day': {},
-#     'hotel-book-stay': {},
-#     'hotel-name': {},
-#     'hotel-area': {},
-#     'hotel-stars': {},
-#     'hotel-parking': {},
-#     'hotel-pricerange': {},
-#     'hotel-type': {},
-#     'hotel-internet': {},
-#     'attraction-type': {},
-#     'attraction-name': {},
-#     'attraction-area': {},
-#     'train-book-people': {},
-#     'train-arriveby': {},
-#     'train-destination': {},
-#     'train-departure': {},
-#     'train-leaveat': {},
-#     'train-day': {}
-# }
+MENTIONED_MAP_LIST_DICT = POSSIBLE_MENTIONED_MAP_LIST_DICT[mentioned_type]
+
+
+logger.info(MENTIONED_MAP_LIST_DICT)
 
 # 以下内容均为直接复制
 act_type = {

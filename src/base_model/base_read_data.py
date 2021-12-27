@@ -727,6 +727,9 @@ def get_turn_label(value_label, inform_label, context_utterance_token, domain_sl
         elif referred_slot != 'none':
             class_type = 'referral'
         else:
+            # if value_label == seen_slots[domain_slot]:
+            #     class_type = 'none'
+            # el
             if domain_slot_type_map[domain_slot] == 'span':
                 if in_utterance_flag:
                     class_type = 'hit'

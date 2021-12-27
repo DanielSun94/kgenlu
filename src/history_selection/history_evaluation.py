@@ -3,7 +3,7 @@ import numpy as np
 import csv
 from history_config import args, result_template, MENTIONED_MAP_LIST_DICT
 from history_read_data import domain_slot_type_map, tokenizer, domain_slot_list, approximate_equal_test, \
-    eliminate_replicate_mentioned_slot, get_str_id
+    eliminate_replicate_mentioned_slot, get_str_id, get_possible_slots_list
 
 use_variant = args['use_label_variant']
 mentioned_slot_pool_size = args['mentioned_slot_pool_size']
@@ -171,10 +171,11 @@ def evaluation_test_eval(predict_gate_dict, predict_value_dict, predict_mentione
 
 
 def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_slot_dict, last_mentioned_mask_dict,
-                          last_str_mentioned_slot_dict, mentioned_type):
+                          last_str_mentioned_slot_dict, current_mentioned_type):
     # 注意，none, dontcare和<pad>哪怕预测到了，我们也不做mentioned slot看
     # 这一设定与预处理时一致，如果是inform要求domain_slot完全一致，如果是label仅要求在一个区间即可
-    skip_value = {'<pad>', 'dontcare', 'none'}
+    # 211214，根据设定重新更新修正设计，在
+    skip_value = {'<pad>', 'dontcare', 'none', ''}
     candidate_mentioned_slot_list_dict = {domain_slot: set() for domain_slot in domain_slot_list}
 
     # 根据Update值设定candidate
@@ -183,19 +184,21 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
         if value not in skip_value:
             for target_domain_slot in domain_slot_list:
                 add_flag = False
-                if mentioned_type == 'label':
+                if current_mentioned_type == 'label':
                     for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
                         if item == target_domain_slot:
                             add_flag = True
-                elif mentioned_type == 'inform':
-                    if source_domain_slot == target_domain_slot:
-                        add_flag = True
+                elif current_mentioned_type == 'inform':
+                    for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
+                        if item == source_domain_slot and item == target_domain_slot:
+                            add_flag = True
                 else:
                     raise ValueError('')
                 if add_flag:
                     source_domain, source_slot = source_domain_slot.split('-')[0], source_domain_slot.split('-')[-1]
-                    candidate_str = str(current_turn_index)+'$'+mentioned_type+'$'+source_domain+'$'+source_slot+'$' + \
-                        value
+                    assert len(source_domain) > 0 and len(source_slot) > 0
+                    candidate_str = str(current_turn_index)+'$'+current_mentioned_type+'$'+source_domain+'$'\
+                                    +source_slot+'$' +value
                     candidate_mentioned_slot_list_dict[target_domain_slot].add(candidate_str)
     # 然后按照降序填入最新的previous mentioned value
     for domain_slot in domain_slot_list:
@@ -213,12 +216,20 @@ def mentioned_slot_update(current_turn_index, update_label_dict, last_mentioned_
                     assert int(idx) <= int(current_turn_index)
                 candidate_str = str(idx) + '$' + mention_type + '$' + domain + '$' + slot + '$' + value
                 candidate_mentioned_slot_list_dict[domain_slot].add(candidate_str)
-    # 去重。在mentioned type为label时，update label dict中应当存在相当一部分是继承的，这一些label需要去重
+
+    # 经过这样的继承后，当mentioned type是inform时，代表随后要开展预测工作
+    # 因此此处的candidate要做的其实是生成possible mentioned list的构建工作
+    # 当mentioned type是label时，代表要进行去重（其实就是去掉inform，只保留最新的label）,其实label时后面的update部分是没有意义的
     for domain_slot in domain_slot_list:
-        candidate_mentioned_slot_list_dict[domain_slot] = eliminate_replicate_mentioned_slot(
-            candidate_mentioned_slot_list_dict[domain_slot])
+        if current_mentioned_type == 'inform':
+            candidate_mentioned_slot_list_dict[domain_slot] = \
+                set(get_possible_slots_list(candidate_mentioned_slot_list_dict[domain_slot], domain_slot)[0])
+            assert len(candidate_mentioned_slot_list_dict[domain_slot]) <= 2
+        elif current_mentioned_type == 'label':
+            candidate_mentioned_slot_list_dict[domain_slot] = \
+                eliminate_replicate_mentioned_slot(candidate_mentioned_slot_list_dict[domain_slot])
         candidate_mentioned_slot_list_dict[domain_slot] = \
-            [item.strip().split('$') for item in candidate_mentioned_slot_list_dict[domain_slot]]
+            [item.strip().split('$')[0: 5] for item in candidate_mentioned_slot_list_dict[domain_slot]]
 
     # 根据update值重设三个指标
     updated_mentioned_slot_dict, updated_mentioned_mask_dict, updated_str_mentioned_slot_dict = {}, {}, {}

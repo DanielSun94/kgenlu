@@ -7,20 +7,24 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from history_config import args, dev_idx_path, test_idx_path, act_data_path, label_normalize_path, dialogue_data_path, \
     SEP_token, CLS_token, cache_path, logger, MENTIONED_MAP_LIST_DICT, DOMAIN_IDX_DICT, UNNORMALIZED_ACTION_SLOT, \
-    ACT_SLOT_NAME_MAP_DICT, SLOT_IDX_DICT, ACT_MAP_DICT, PAD_token, UNK_token
+    ACT_SLOT_NAME_MAP_DICT, SLOT_IDX_DICT, ACT_MAP_DICT, PAD_token, UNK_token, approximate_equal_path
 import random
 import re
 import torch
-from transformers import RobertaTokenizer
+from transformers import RobertaTokenizer, BertTokenizer, ConvBertTokenizer
 
 
 if 'roberta' in args['pretrained_model']:
     tokenizer = RobertaTokenizer.from_pretrained(args['pretrained_model'])
+elif 'convBert' in args['pretrained_model']:
+    tokenizer = ConvBertTokenizer()
+elif 'bert' in args['pretrained_model']:
+    tokenizer = BertTokenizer.from_pretrained(args['pretrained_model'])
 else:
     raise ValueError('')
 
 NORMALIZE_MAP = json.load(open(label_normalize_path, 'r'))
-
+label_normalize_map = json.load(open(approximate_equal_path, 'r'))
 overwrite_cache = args['overwrite_cache']
 use_multiple_gpu = args['multi_gpu']
 data_fraction = args['data_fraction']
@@ -40,7 +44,6 @@ domain_slot_list = NORMALIZE_MAP['slots']
 domain_index_map = NORMALIZE_MAP['domain_index']
 slot_index_map = NORMALIZE_MAP['slot_index']
 domain_slot_type_map = NORMALIZE_MAP['slots-type']
-label_normalize_map = NORMALIZE_MAP['label_maps']
 id_cache_dict = {}
 active_slot_count = dict()
 unpointable_slot_value_list = []
@@ -416,6 +419,8 @@ def state_structurize(state, context_label_dict, slot_value_index_dict):
             for idx in range(len(mentioned_slot_list)):
                 if mentioned_slot_list[idx][10] == mentioned_slot:
                     mentioned_idx = idx + 1
+            if mentioned_slot != 'none' and mentioned_idx == 0:
+                logger.info('error mentioned slots')
         else:
             raise ValueError('')
 
@@ -598,24 +603,62 @@ def eliminate_replicate_mentioned_slot(mentioned_slot_set):
     # 由于我们的设计，两方面可能存在累积，一种是一个utterance中其实没提到某个状态，但是出于继承的原因，我们每次label都会有某个状态出现
     # 另一部分，一个utterance中可能inform的就是真值
     # 对于这种重复，我们的策略是，同样的domain-slot-value配对，只保留最新的一个mention，如果是Inform和Label冲突，仅保留label
+    #
+    # 211214 修改
+    # 由于发现模型对精细化语义理解存在问题，不适合做精细化语义处理分类，因此进行设计修改，核心思想是尽可能少的避免多个可能mentioned slot
+    # 的纯粹语义判断
+    # 注意，该函数只用于预测完了之后
+    # 修改后的设计是，保证每个domain slot只存储label项，不存储inform项，且label项只存储turn idx最大的那个
+    # 经过这样的设计之后，历史label只存储最新的
     mentioned_slot_dict = {}
     for mentioned_slot in mentioned_slot_set:
-        turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')
-        key = domain+'$'+slot+'$'+value
+        # 此处必须这么写，不然在一些极端特殊的情况（也就是content内容中本身也存在$）时会出错。
+        turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')[0: 5]
+        key = domain+'$'+slot
         if key not in mentioned_slot_dict:
-            mentioned_slot_dict[key] = turn_idx, mentioned_type
+            if mentioned_type == 'label':
+                mentioned_slot_dict[key] = turn_idx, mentioned_type, value
         else:
-            previous_idx, previous_mentioned_type = mentioned_slot_dict[key]
+            previous_idx, previous_mentioned_type, previous_value = mentioned_slot_dict[key]
+            if mentioned_type == 'inform':
+                continue
             if int(turn_idx) > int(previous_idx):
-                mentioned_slot_dict[key] = turn_idx, mentioned_type
-            elif int(turn_idx) == int(previous_idx) and mentioned_type == 'label' and \
-                    previous_mentioned_type == 'inform':
-                mentioned_slot_dict[key] = turn_idx, mentioned_type
+                mentioned_slot_dict[key] = turn_idx, mentioned_type, value
     new_mention_slot_set = set()
     for key in mentioned_slot_dict:
-        turn_idx, mentioned_type = mentioned_slot_dict[key]
-        new_mention_slot_set.add(str(turn_idx)+'$'+str(mentioned_type)+'$'+key)
+        turn_idx, mentioned_type, value = mentioned_slot_dict[key]
+        new_mention_slot_set.add(str(turn_idx)+'$'+str(mentioned_type)+'$'+key+'$'+value)
     return new_mention_slot_set
+
+
+def get_possible_slots_list(mentioned_slot_set, target_domain_slot):
+    possible_slot_dict = {'label': None, 'inform': None}
+    for mentioned_slot in mentioned_slot_set:
+        turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')
+        if value == 'none' or value == 'dontcare':
+            continue
+        source_domain_slot = domain+'-'+slot if domain+'-'+slot in domain_slot_type_map else domain+'-book-'+slot
+        assert source_domain_slot in domain_slot_type_map
+        if mentioned_type == 'label':
+            for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
+                if item == target_domain_slot:  # 这个设计是为了控制自己refer自己是否合法
+                    if item == source_domain_slot:
+                        possible_slot_dict['label'] = turn_idx, mentioned_type, domain, slot, value
+                    elif possible_slot_dict['label'] is None:  # 当完全匹配的值不存在时可以赋值给不同的refer项目
+                        possible_slot_dict['label'] = turn_idx, mentioned_type, domain, slot, value
+        else:
+            assert mentioned_type == 'inform'
+            for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
+                if item == target_domain_slot and source_domain_slot == target_domain_slot:
+                    assert possible_slot_dict['inform'] is None  # 按照设计，这个slot至多被访问一次
+                    possible_slot_dict['inform'] = turn_idx, mentioned_type, domain, slot, value
+    possible_slot_list = []
+    for key in possible_slot_dict:
+        if possible_slot_dict[key] is not None:
+            turn_idx, mentioned_type, domain, slot, value = possible_slot_dict[key]
+            possible_slot_list.append(turn_idx+"$"+mentioned_type+"$"+domain+"$"+slot+"$"+value)
+    assert len(possible_slot_list) <= 2
+    return possible_slot_list, possible_slot_dict
 
 
 def check_mentioned_slot(value_label, mentioned_slot_set, target_domain_slot):
@@ -626,40 +669,20 @@ def check_mentioned_slot(value_label, mentioned_slot_set, target_domain_slot):
     # 其中，所谓“最合适”指的是，如果valid list中只有一个满足label相等，则返回这个，如果有多个，则优先取后提到的，如果轮次也一样，
     # 取domain slot完全一致的
     # 如果是inform，要保证参考domain slot完全一致，如果是label，只需近似许可（我们假设不会出现用户答非所问的情况）
-    possible_slot_list, valid_list = [], []
-    for mentioned_slot in mentioned_slot_set:
-        turn_idx, mentioned_type, domain, slot, value = mentioned_slot.strip().split('$')
-        if value == 'none' or value == 'dontcare':
-            continue
-        source_domain_slot = domain+'-'+slot if domain+'-'+slot in domain_slot_type_map else domain+'-book-'+slot
-        assert source_domain_slot in domain_slot_type_map
-        if mentioned_type == 'label':
-            for item in MENTIONED_MAP_LIST_DICT[source_domain_slot]:
-                if item == target_domain_slot:
-                    possible_slot_list.append(mentioned_slot)
-                    if approximate_equal_test(value_label, value, use_variant=variant_flag):
-                        valid_list.append([turn_idx, mentioned_type, domain, slot, value, mentioned_slot])
-        else:
-            assert mentioned_type == 'inform'
-            if source_domain_slot == target_domain_slot:
-                possible_slot_list.append(mentioned_slot)
-                if approximate_equal_test(value_label, value, use_variant=variant_flag):
-                    valid_list.append([turn_idx, mentioned_type, domain, slot, value, mentioned_slot])
-
-    if value_label == 'none' or value_label == 'dontcare':
-        return False, 'none', possible_slot_list
-    elif len(valid_list) == 0:
-        return False, 'none', possible_slot_list
-    elif len(valid_list) == 1:
-        return True, valid_list[0][5], possible_slot_list
-    else:
-        # 如果有多个匹配的，则从后往前数，取domain slot能完全对上的，如果不行就取最新的
-        valid_list = sorted(valid_list, key=lambda x: int(x[0]))
-        for index in range(len(valid_list)):
-            turn_idx, mentioned_type, domain, slot, value, mentioned_slot = valid_list[len(valid_list)-1-index]
-            if target_domain_slot == domain+'-'+slot or target_domain_slot == domain+'-book-'+slot:
-                return True, mentioned_slot, possible_slot_list
-        return True, valid_list[-1][5], possible_slot_list
+    #
+    # 211214 修改设置，possible只在两个中进行选择，label只取一次(优先选择domain slot完全一致的)，inform也只取一次。
+    # 按照设计，
+    possible_slot_list, possible_slot_dict = get_possible_slots_list(mentioned_slot_set, target_domain_slot)
+    mentioned_slot = 'none'
+    mentioned = False
+    for key in 'inform', 'label':
+        # 这样可以确保label被优先取到
+        if possible_slot_dict[key] is not None:
+            turn_idx, mentioned_type, domain, slot, value = possible_slot_dict[key]
+            if approximate_equal_test(value, value_label, use_variant=True):
+                mentioned_slot = turn_idx+"$"+mentioned_type+"$"+domain+"$"+slot+"$"+value
+                mentioned = True
+    return mentioned, mentioned_slot, possible_slot_list
 
 
 def state_extract(state_dict):
@@ -865,8 +888,15 @@ def normalize_label(domain_slot, value_label):
     # checked 211206
     # 根据设计，不同的slot对应不同的标准化方法（比如时间和其他的就不一样），因此要输入具体的slot name
     # Normalization of empty slots
-    if isinstance(value_label, str):
+    if isinstance(value_label, str):  # multiwoz 21
         value_label = value_label.strip().lower()
+    elif isinstance(value_label, list):  # multiwoz 22
+        if len(value_label) == 0 or (not isinstance(value_label[0], str)):
+            return 'none'
+        value_label = value_label[0].strip().lower()
+    else:
+        raise ValueError('')
+
     if value_label == '' or value_label == "not mentioned":
         return "none"
 
@@ -1117,6 +1147,7 @@ def slot_value_indexing(data_dict):
                 if domain_slot_type_map[domain_slot] != 'classify':
                     continue
                 value = state_dict[domain_slot]
+
                 # 归一化，与后期步骤统一，不然会出现dict中的dict尺寸大于归一化后的情况
                 value = normalize_label(domain_slot, value)
                 if value == 'none' or value == 'dontcare' or value in slot_value_index_dict[domain_slot]:

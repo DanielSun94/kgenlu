@@ -22,15 +22,15 @@ config = {
     'pretrained_model': config_name + '-' + model_type,
     'max_length': 512,
     'dataset': dataset,
-    'batch_size': 8,
+    'batch_size': 32,
     'epoch': 20,
-    'data_fraction': 1,
+    'data_fraction': 0.1,
     'encoder_d_model': d_model,
     'learning_rate': lr,
     'device': device,
     'auxiliary_act_domain_assign': True,
     'delex_system_utterance': False,
-    'use_multi_gpu': False,
+    'use_multi_gpu': True,
     'no_value_assign_strategy': 'value',  # value
     'max_grad_norm': 1.0,
     'gate_weight': 0.6,
@@ -99,16 +99,24 @@ label_normalize_path = os.path.join(multiwoz_dataset_folder, 'label_map.json')
 act_data_path = os.path.join(multiwoz_dataset_folder, 'dialogue_acts.json')
 approximate_equal_path = os.path.join(multiwoz_dataset_folder, 'approximate_test.json')
 
-cache_path = os.path.abspath('./history_selection_cache/dialogue_data_cache_{}.pkl'
-                             .format(config['process_name']))
+
 model_checkpoint_folder = os.path.abspath('./model_check_point')
 evaluation_folder = os.path.abspath('./evaluation')
+cache_folder = os.path.abspath('./history_selection_cache')
+if not os.path.exists(model_checkpoint_folder):
+    os.makedirs(model_checkpoint_folder)
+if not os.path.exists(evaluation_folder):
+    os.makedirs(evaluation_folder)
+if not os.path.exists(cache_folder):
+    os.makedirs(cache_folder)
+
+cache_path = os.path.join(cache_folder, 'dialogue_data_cache_{}.pkl'.format(config['process_name']))
+
 # dataset, time, epoch, general acc
-medium_result_template = os.path.join(os.path.abspath('./evaluation'), config['process_no'] +
+medium_result_template = os.path.join(evaluation_folder, config['process_no'] +
                                       '_{}_{}_{}_{}.pkl')
-ckpt_template = os.path.join(os.path.abspath('./model_checkpoint'), config['process_no']+'_{}_{}.ckpt')
-result_template = os.path.join(os.path.abspath('./evaluation'), config['process_no'] +
-                               '_{}_{}_epoch_{}_{}.csv')
+ckpt_template = os.path.join(model_checkpoint_folder, config['process_no']+'_{}_{}.ckpt')
+result_template = os.path.join(evaluation_folder, config['process_no'] + '_{}_{}_epoch_{}_{}.csv')
 
 
 # logger
